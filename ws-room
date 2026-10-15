@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+# ws-room — capture and reopen HUD Workspaces "rooms" (a card's apps).
+#
+#   ws-room capture <workspace>
+#       print the apps on a workspace as JSON: [{class, title, argv, cwd}],
+#       left-to-right, top-to-bottom
+#   ws-room launch <workspace> <apps-json>
+#       switch to the workspace and start each app there; windows that open
+#       elsewhere (apps that hand off to an already running copy, like
+#       Firefox) are moved onto it as they appear
+#   ws-room check <apps-json>
+#       print the command each app would be started with, one per line,
+#       or "skip" (nothing is started)
+#
+# A room reopens apps, not their contents: a terminal comes back as a fresh
+# shell in the folder it was in, a browser opens a new window.
+#
+# Rooms are stored commands, so they are treated as data: each app is an
+# argv list (never a shell string), every element is quoted when the app is
+# started, the program must exist, and `flatpak run` only takes a plain app
+# id. Rooms saved before 1.15 stored a shell string in `cmd`; it is split
+# into words without running anything (python shlex) and then checked the
+# same way.
+#
+# Problems go to $XDG_STATE_HOME/hud-workspaces/log.
+
+here=$(dirname "$(readlink -f "$0")")
+mode=$1
+ws=$2
+
+log_file=${XDG_STATE_HOME:-$HOME/.local/state}/hud-workspaces/log
+log() {
+  mkdir -p -- "${log_file%/*}" 2>/dev/null
+  printf '%s ws-room %s\n' "$(date '+%F %T')" "$*" >>"$log_file" 2>/dev/null
+}
+
+# Limits, so a huge or crafted room can't bog the bar down.
+max_apps=30
+max_arg=4096
+
+shells='^(bash|zsh|fish|sh|dash|nu|xonsh|elvish|tcsh|ksh)$'
+flatpak_id='^[A-Za-z0-9._-]+$'
+
+# cwd of a terminal's shell (its first child shell), else of the process.
+cwd_of() {
+  local pid=$1 child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    if [[ $(cat "/proc/$child/comm" 2>/dev/null) =~ $shells ]]; then
+      readlink "/proc/$child/cwd" 2>/dev/null
+      return
+    fi
+  done
+  readlink "/proc/$pid/cwd" 2>/dev/null
+}
+
+# The argv that brings an app back, from its running process, as a JSON
+# array (empty output = can't be brought back).
+argv_of() {
+  local pid=$1 class=$2 flatpak arg out=()
+  flatpak=$(grep -o 'app-flatpak-[^/]*\.scope' "/proc/$pid/cgroup" 2>/dev/null | head -1 |
+    sed -E 's/^app-flatpak-(.*)-[0-9]+\.scope$/\1/')
+  if [[ -n $flatpak ]]; then
+    [[ $flatpak =~ $flatpak_id ]] || { log "skipped flatpak with an odd id: $flatpak"; return; }
+    jq -cn --arg id "$flatpak" '["flatpak", "run", $id]'
+    return
+  fi
+  case $class in
+    org.gnome.Terminal) echo '["gnome-terminal"]'; return ;;
+  esac
+  while IFS= read -r -d '' arg; do
+    # D-Bus activated apps (Nautilus, GNOME apps) run as a service; started
+    # plainly they open a window.
+    [[ $arg == --gapplication-service ]] && continue
+    out+=("$arg")
+  done <"/proc/$pid/cmdline"
+  (( ${#out[@]} )) || return
+  # Some apps (Electron ones like Signal) rewrite their command line into
+  # one string with spaces; fall back to the executable itself.
+  if (( ${#out[@]} == 1 )) && [[ ${out[0]} == *" "* && ! -x ${out[0]} ]]; then
+    out=("$(readlink "/proc/$pid/exe" 2>/dev/null)")
+    [[ -x ${out[0]} ]] || return
+  fi
+  [[ ${out[0]} == */gnome-terminal-server ]] && { echo '["gnome-terminal"]'; return; }
+  printf '%s\0' "${out[@]}" | jq -cRs 'split("\u0000") | .[:-1]'
+}
+
+# Folders open in Nautilus windows, one path per line, from its
+# FileManager1 D-Bus interface (the process itself only knows $HOME).
+nautilus_folders() {
+  local uri path
+  gdbus call --session --dest org.freedesktop.FileManager1 \
+    --object-path /org/freedesktop/FileManager1 \
+    --method org.freedesktop.DBus.Properties.Get org.freedesktop.FileManager1 \
+    OpenWindowsWithLocations 2>/dev/null | grep -o "'file://[^']*'" | tr -d "'" |
+    while read -r uri; do
+      path=${uri#file://}
+      printf '%b\n' "${path//%/\\x}"
+    done
+}
+
+# Nautilus titles a window with the folder's name ("Home" for $HOME).
+folder_title() {
+  [[ $1 == "$HOME" ]] && { echo Home; return; }
+  [[ $1 == / ]] && { echo /; return; }
+  basename -- "$1"
+}
+
+capture() {
+  local rows=() pid class title addr argv cwd folders=() used=() f
+  mapfile -t folders < <(nautilus_folders)
+  local wins
+  wins=$(hyprctl clients -j | jq -r --argjson ws "$ws" '
+    [.[] | select(.workspace.id == $ws and .mapped and (.hidden | not))]
+    | sort_by(.at[1], .at[0]) | .[] | [.pid, .class, .title, .address] | @tsv')
+
+  # Nautilus windows first, so a terminal can pick the folder shown next to it.
+  local -A nfolder=()
+  local wsfolders=()
+  while IFS=$'\t' read -r pid class title addr; do
+    [[ $class == org.gnome.Nautilus ]] || continue
+    for f in "${!folders[@]}"; do
+      [[ -n ${used[f]} ]] && continue
+      if [[ $(folder_title "${folders[f]}") == "$title" && -d ${folders[f]} ]]; then
+        nfolder[$addr]=${folders[f]}
+        wsfolders+=("${folders[f]}")
+        used[f]=1
+        break
+      fi
+    done
+  done <<<"$wins"
+  local -A termused=()
+
+  while IFS=$'\t' read -r pid class title addr; do
+    [[ $pid =~ ^[0-9]+$ ]] && (( pid > 0 )) || continue
+    (( ${#rows[@]} < max_apps )) || { log "capture $ws: more than $max_apps windows, rest skipped"; break; }
+    argv=$(argv_of "$pid" "$class")
+    [[ -n $argv ]] || continue
+    if [[ $class == org.gnome.Nautilus ]]; then
+      cwd=${nfolder[$addr]:-}
+      if [[ -n $cwd ]]; then
+        argv=$(jq -cn --arg d "$cwd" '["nautilus", "--new-window", $d]')
+      else
+        cwd=$(cwd_of "$pid")
+      fi
+    elif [[ $class == org.gnome.Terminal ]]; then
+      # One server runs every GNOME Terminal window; its shells can't be told
+      # apart per window, so keep a folder only when there's just one.
+      local kids
+      kids=$(pgrep -P "$pid" | while read -r k; do
+        [[ $(cat "/proc/$k/comm" 2>/dev/null) =~ $shells ]] && echo "$k"; done)
+      cwd=""
+      [[ $(wc -l <<<"$kids") == 1 && -n $kids ]] && cwd=$(readlink "/proc/$kids/cwd")
+      # Otherwise read it from the default "user@host:~/path" window title.
+      if [[ -z $cwd && $title =~ ^[^@[:space:]]+@[^:[:space:]]+:(.+)$ ]]; then
+        cwd=${BASH_REMATCH[1]}
+        [[ $cwd == "~"* ]] && cwd=$HOME${cwd:1}
+        [[ -d $cwd ]] || cwd=""
+      fi
+      # Else (a program set the title, e.g. an editor or Claude Code): a
+      # shell sitting in a folder that a Nautilus window on this workspace
+      # shows, the usual "open a terminal here" setup.
+      if [[ -z $cwd && ${#wsfolders[@]} -gt 0 ]]; then
+        local k kc
+        while read -r k; do
+          [[ -n $k ]] || continue
+          kc=$(readlink "/proc/$k/cwd")
+          [[ -n ${termused[$kc]:-} ]] && continue
+          for f in "${wsfolders[@]}"; do
+            if [[ $kc == "$f" ]]; then cwd=$kc; termused[$kc]=1; break 2; fi
+          done
+        done <<<"$kids"
+      fi
+      [[ -n $cwd ]] && argv=$(jq -cn --arg d "$cwd" '["gnome-terminal", "--working-directory=" + $d]')
+    else
+      cwd=$(cwd_of "$pid")
+    fi
+    rows+=("$(jq -cn --arg class "$class" --arg title "$title" --argjson argv "$argv" --arg cwd "$cwd" \
+      '{class: $class, title: $title[:200], argv: $argv, cwd: $cwd}')")
+  done <<<"$wins"
+  if (( ${#rows[@]} )); then printf '%s\n' "${rows[@]}" | jq -cs .; else echo '[]'; fi
+}
+
+# Lua string literal: backslash, quote and line breaks escaped, other
+# control characters dropped. The one escaper for everything sent to
+# `hyprctl eval` from here.
+lua_str() {
+  local s=${1//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  s=$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037\177')
+  printf '"%s"' "$s"
+}
+
+# The validated argv of app <i> in $apps, NUL-separated on stdout; nothing
+# (and a log line) if it isn't safe to start.
+app_argv() {
+  local i=$1 argv
+  argv=$(jq -c --argjson i "$i" '.[$i] |
+    if (.argv | type) == "array" then .argv
+    elif (.cmd | type) == "string" then {legacy: .cmd}
+    else [] end' <<<"$apps")
+  if [[ $(jq -r 'type' <<<"$argv") == object ]]; then
+    # Pre-1.15 room: split the old shell string into words, run nothing.
+    argv=$(jq -r '.legacy' <<<"$argv" | python3 -I -c '
+import json, shlex, sys
+try:
+    print(json.dumps(shlex.split(sys.stdin.read())))
+except ValueError:
+    print("[]")')
+  fi
+  jq -e --argjson max "$max_arg" 'type == "array" and length > 0 and length <= 64
+    and all(.[]; type == "string" and length > 0 and length <= $max and (contains("\u0000") | not))' \
+    <<<"$argv" >/dev/null || { log "launch $ws: app $i has no usable command, skipped"; return; }
+  local prog
+  prog=$(jq -r '.[0]' <<<"$argv")
+  if ! command -v -- "$prog" >/dev/null 2>&1; then
+    log "launch $ws: $prog not found, skipped"
+    return
+  fi
+  if [[ ${prog##*/} == flatpak ]]; then
+    jq -e --arg re "$flatpak_id" 'length == 3 and .[1] == "run" and (.[2] | test($re))' \
+      <<<"$argv" >/dev/null || { log "launch $ws: unexpected flatpak command, skipped"; return; }
+  fi
+  jq -j '.[] | ., "\u0000"' <<<"$argv"
+}
+
+launch() {
+  local n i cwd class full arg argv
+  apps=${3:-[]}
+  n=$(jq 'if type == "array" then length else error end' <<<"$apps" 2>/dev/null) ||
+    { log "launch $ws: room is not a list"; exit 1; }
+  (( n > max_apps )) && { log "launch $ws: $n apps, only the first $max_apps started"; n=$max_apps; }
+  "$here/ws-step" goto "$ws"
+
+  local before
+  before=$(hyprctl clients -j | jq -c '[.[].address]')
+  local want=()
+  for (( i = 0; i < n; i++ )); do
+    mapfile -d '' -t argv < <(app_argv "$i")
+    (( ${#argv[@]} )) || continue
+    cwd=$(jq -r --argjson i "$i" '.[$i].cwd // "" | strings' <<<"$apps")
+    class=$(jq -r --argjson i "$i" '.[$i].class // "" | strings' <<<"$apps")
+    [[ -d $cwd ]] || cwd=$HOME
+    # Every word quoted: nothing from the room is read as shell syntax.
+    full="cd $(printf '%q' "$cwd") && exec"
+    for arg in "${argv[@]}"; do full+=" $(printf '%q' "$arg")"; done
+    # The rule places apps whose window belongs to the started process;
+    # the watcher below catches the rest.
+    hyprctl eval "hl.exec_cmd($(lua_str "$full"), { workspace = $(lua_str "$ws silent") })" >/dev/null ||
+      log "launch $ws: hyprctl refused to start ${argv[0]}"
+    want+=("$class")
+  done
+  (( ${#want[@]} )) || exit 0
+
+  # Move new windows of the expected apps onto the room as they appear.
+  local deadline=$(( SECONDS + 20 )) wanted
+  wanted=$(printf '%s\n' "${want[@]}" | jq -R . | jq -cs .)
+  while (( SECONDS < deadline )); do
+    local moved
+    moved=$(hyprctl clients -j | jq -r --argjson before "$before" --argjson wanted "$wanted" --argjson ws "$ws" '
+      [.[] | select((.address as $a | $before | index($a) | not))] as $new
+      | reduce $new[] as $w ({left: $wanted, out: []};
+          (.left | index($w.class)) as $i
+          | if $i == null then . else
+              .left |= (.[:$i] + .[$i + 1:])
+              | if $w.workspace.id != $ws then .out += [$w.address] else . end
+            end)
+      | (.out[]), "left=\(.left | length)"')
+    local left=""
+    while read -r line; do
+      case $line in
+        left=*) left=${line#left=} ;;
+        0x*) [[ $line =~ ^0x[0-9a-fA-F]+$ ]] &&
+          hyprctl dispatch "hl.dsp.window.move({ workspace = \"$ws\", window = \"address:$line\", follow = false })" >/dev/null ;;
+      esac
+    done <<<"$moved"
+    [[ $left == 0 ]] && break
+    sleep 0.4
+  done
+  [[ $left == 0 ]] || log "launch $ws: $left app window(s) never appeared"
+}
+
+check() {
+  local n i argv
+  apps=${1:-[]}
+  n=$(jq 'if type == "array" then length else error end' <<<"$apps" 2>/dev/null) || { echo "not a list"; exit 1; }
+  for (( i = 0; i < n && i < max_apps; i++ )); do
+    mapfile -d '' -t argv < <(app_argv "$i")
+    if (( ${#argv[@]} )); then printf '%q ' "${argv[@]}" | sed 's/ $//'; echo; else echo skip; fi
+  done
+}
+
+case $mode in
+  check) ws=-; check "$2" ;;
+  capture) [[ $ws =~ ^[0-9]+$ ]] || { echo '[]'; exit 1; }; capture ;;
+  launch) [[ $ws =~ ^[0-9]+$ ]] || { log "launch: bad workspace '$ws'"; exit 1; }; launch "$@" ;;
+  *) echo "usage: ws-room capture <ws> | launch <ws> <apps-json>" >&2; exit 2 ;;
+esac

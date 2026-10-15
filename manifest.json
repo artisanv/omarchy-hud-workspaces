@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "swordfish.workspaces",
+  "name": "HUD Workspaces",
+  "version": "1.15.0",
+  "author": "Nasser Al-Ostath",
+  "description": "HUD-geometric workspace cards with hover room preview, drag-reorder, name, emoji or custom icon and colour per workspace, window-drop, saved rooms",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Workspaces.qml"
+  },
+  "barWidget": {
+    "displayName": "HUD Workspaces",
+    "description": "HUD-geometric workspace cards with hover room preview, drag-reorder, name, emoji or custom icon and colour per workspace, window-drop, saved rooms",
+    "category": "Compositor",
+    "allowMultiple": false
+  }
+}

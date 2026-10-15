@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# ws-step — workspace switching that follows HUD Workspaces' bar order.
+#
+#   ws-step next|prev [--wrap]
+#                       focus the neighbouring card (bar wheel); --wrap jumps
+#                       from one end to the other
+#   ws-step swipe left|right
+#                       3-finger swipe: direction mapping and wrapping come from
+#                       the swipeNatural / wrapSwipe settings
+#   ws-step goto <id>   focus a workspace (card click), sliding in from the side
+#                       it sits on in the bar
+#   ws-step slot <n>    Super+<n>: focus the n-th card on the bar
+#   ws-step move <n>    Super+Shift+<n>: move the active window to the n-th
+#                       card and follow it
+#   ws-step move-silent <n>
+#                       Super+Shift+Alt+<n>: same, without following
+#                       (past the last card, or with keysFollowBar off, <n> is
+#                       the plain workspace number, like stock Omarchy)
+#   ws-step apply       (re)apply the chosen transition, direction-free
+#   ws-step preview     show the transition: step to a neighbouring card and back
+#
+# Hyprland picks a workspace slide's direction from workspace numbers, which
+# runs backwards once the bar is reordered. Each switch therefore sets the
+# animation's direction from bar positions, switches, then resets the style to
+# its direction-free form so Super+<number> doesn't inherit a stale direction.
+#
+# Order logic mirrors computeWorkspaceIds() in Workspaces.qml: saved order
+# first (ids above 5, and deleted ones, only while they exist), then 1-5
+# (minus deleted ones that don't exist), then any other live workspace
+# numerically.
+#
+# Settings (the widget's entry in shell.json):
+#   transition          glide | slide | verticalglide | vertical | fade | none
+#   transitionCurve     smooth | snappy | bouncy | gentle | easeinout | linear
+#   transitionDuration  milliseconds, 100-1500
+#   transitionDistance  slide distance in % for glide styles, 5-100
+#   swipeNatural        true: swipe left = card to the right (default)
+#   wrapSwipe           true: swiping past an end wraps (default false)
+#   keysFollowBar       true: Super+<n> goes by bar position (default)
+
+mode=${1:-next}
+
+# Failures (Hyprland refusing a call, e.g. after an API change) go to the
+# shared log instead of vanishing.
+log_file=${XDG_STATE_HOME:-$HOME/.local/state}/hud-workspaces/log
+log() {
+  mkdir -p -- "${log_file%/*}" 2>/dev/null
+  printf '%s ws-step %s\n' "$(date '+%F %T')" "$*" >>"$log_file" 2>/dev/null
+}
+# hyprctl that logs a refused call (non-zero exit or an "error" reply).
+hc() {
+  local out
+  out=$(hyprctl "$@" 2>&1)
+  if (( $? != 0 )) || [[ $out == *error* ]]; then
+    log "$mode: hyprctl $1 failed: ${out:0:300}"
+    return 1
+  fi
+}
+
+cfg=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json
+
+entry=$(jq -c '[.bar.layout[]?[]? | objects | select(.id == "swordfish.workspaces")][0] // {}' "$cfg" 2>/dev/null) || entry='{}'
+# Tests feed the entry and the live workspaces in directly.
+[[ -n ${HUD_TEST_ENTRY:-} ]] && entry=$HUD_TEST_ENTRY
+# Not `.[$k] // $d`: jq's // also skips false, which turned every "off" toggle back on.
+get() { jq -r --arg k "$1" --arg d "$2" 'if .[$k] == null then $d else .[$k] end | tostring' <<<"$entry"; }
+
+transition=$(get transition glide)
+[[ $transition == slidefade ]] && transition=glide   # v1.6 name
+curve_name=$(get transitionCurve smooth)
+distance=$(get transitionDistance "")
+duration=$(get transitionDuration "")
+if [[ -z $duration ]]; then
+  # v1.6 presets, mapped to what they actually ran at.
+  case $(get transitionSpeed normal) in
+    slow) duration=250 ;;
+    fast) duration=700 ;;
+    *) duration=400 ;;
+  esac
+fi
+[[ $duration =~ ^[0-9]+([.][0-9]+)?$ ]] || duration=400
+[[ -z $distance && $(get transition glide) == slidefade ]] && distance=60
+distance=${distance%.*}
+[[ $distance =~ ^[0-9]+$ ]] || distance=20
+(( distance < 1 )) && distance=1
+(( distance > 100 )) && distance=100
+
+# Hyprland's speed is the duration in deciseconds.
+speed=$(awk -v ms="$duration" 'BEGIN { s = ms / 100; if (s < 0.5) s = 0.5; if (s > 20) s = 20; printf "%.2f", s }')
+
+case $curve_name in
+  snappy) points='{ 0.15, 0.9 }, { 0.1, 1 }' ;;
+  bouncy) points='{ 0.34, 1.56 }, { 0.64, 1 }' ;;
+  gentle) points='{ 0.4, 0 }, { 0.2, 1 }' ;;
+  easeinout) points='{ 0.65, 0.05 }, { 0.36, 1 }' ;;
+  linear) points='{ 0, 0 }, { 1, 1 }' ;;
+  *) points='{ 0.22, 1 }, { 0.36, 1 }' ;;  # smooth
+esac
+curve="hl.curve(\"wsCurve\", { type = \"bezier\", points = { $points } })"
+
+# style <right|left|""> — animation style for the transition; empty = no direction.
+style() {
+  local d=$1 v=""
+  case $d in right) v=bottom ;; left) v=top ;; esac
+  case $transition in
+    slide) echo "slide${d:+ $d}" ;;
+    vertical) echo "slidevert${v:+ $v}" ;;
+    verticalglide) echo "slidefadevert${v:+ $v} $distance%" ;;
+    fade) echo "fade" ;;
+    *) echo "slidefade${d:+ $d} $distance%" ;;  # glide
+  esac
+}
+
+# anim_lua <direction> — Lua that sets the workspaces animation.
+anim_lua() {
+  if [[ $transition == none ]]; then
+    echo 'hl.animation({ leaf = "workspaces", enabled = false })'
+  else
+    echo "hl.animation({ leaf = \"workspaces\", enabled = true, speed = $speed, bezier = \"wsCurve\", style = \"$(style "$1")\" })"
+  fi
+}
+
+if [[ $mode == apply ]]; then
+  hc eval "$curve; $(anim_lua "")"
+  exit 0
+fi
+
+wrap=0
+[[ $2 == --wrap ]] && wrap=1
+if [[ $mode == swipe ]]; then
+  natural=$(get swipeNatural true)
+  [[ $(get wrapSwipe false) == true ]] && wrap=1
+  if [[ $2 == left ]]; then
+    [[ $natural == false ]] && mode=prev || mode=next
+  else
+    [[ $natural == false ]] && mode=next || mode=prev
+  fi
+fi
+
+order=$(jq -c '.order // [] | if type == "string" then (try fromjson catch []) else . end
+  | if type == "array" then . else [] end' <<<"$entry")
+hidden=$(jq -c '.hidden // [] | if type == "string" then (try fromjson catch []) else . end
+  | if type == "array" then map(tonumber? // empty) else [] end' <<<"$entry")
+if [[ -n ${HUD_TEST_LIVE:-} ]]; then
+  live=$HUD_TEST_LIVE cur=${HUD_TEST_CUR:-1}
+else
+  live=$(hyprctl workspaces -j | jq -c '[.[].id | select(. > 0 and . <= 10)]')
+  cur=$(hyprctl activeworkspace -j | jq '.id')
+fi
+
+mapfile -t ids < <(jq -n -r --argjson order "$order" --argjson live "$live" --argjson hidden "$hidden" '
+  def has($x): any(.[]; . == $x);
+  def gone($x): ($live | has($x) | not);
+  [$order[] | (tonumber? // empty) | select(. == floor and . >= 1 and . <= 10)]
+  | reduce .[] as $x ([]; if has($x) or (($x > 5 or ($hidden | has($x))) and gone($x)) then . else . + [$x] end)
+  | reduce (1, 2, 3, 4, 5) as $x (.; if has($x) or (($hidden | has($x)) and gone($x)) then . else . + [$x] end)
+  | reduce ($live | sort[]) as $x (.; if has($x) then . else . + [$x] end)
+  | .[]')
+
+# `ws-step order`: print the bar order (used by the tests).
+if [[ $mode == order ]]; then
+  echo "${ids[*]}"
+  exit 0
+fi
+
+index_of() {
+  local i
+  for i in "${!ids[@]}"; do
+    [[ ${ids[$i]} == "$1" ]] && echo "$i" && return
+  done
+  echo -1
+}
+
+idx=$(index_of "$cur")
+
+# switch_to <target-index> [direction] — focus ids[target], sliding by bar
+# direction unless one is given (a wrap keeps the travel direction).
+switch_to() {
+  local t=$1 d=$2
+  [[ -z $d ]] && (( idx >= 0 && t >= 0 )) && { (( t > idx )) && d=right || d=left; }
+  hc eval "$curve; $(anim_lua "$d"); hl.dispatch(hl.dsp.focus({ workspace = \"${ids[$t]}\" })); $(anim_lua "")"
+}
+
+if [[ $mode == preview ]]; then
+  (( idx < 0 || ${#ids[@]} < 2 )) && exit 0
+  (( idx + 1 < ${#ids[@]} )) && t=$(( idx + 1 )) || t=$(( idx - 1 ))
+  home=$idx
+  switch_to "$t"
+  sleep "$(awk -v ms="$duration" 'BEGIN { printf "%.2f", ms / 1000 + 0.6 }')"
+  idx=$t
+  switch_to "$home"
+  exit 0
+fi
+
+# Super+<n> family: n-th card, or workspace n past the last card.
+if [[ $mode == slot || $mode == move || $mode == move-silent ]]; then
+  n=${2:?usage: ws-step $mode <n>}
+  [[ $n =~ ^[0-9]+$ ]] && (( n >= 1 )) || exit 1
+  if [[ $(get keysFollowBar true) != false ]] && (( n <= ${#ids[@]} )); then
+    tidx=$(( n - 1 ))
+    target=${ids[$tidx]}
+  else
+    target=$n
+    tidx=$(index_of "$target")
+  fi
+  if [[ $mode == move-silent ]]; then
+    hc dispatch "hl.dsp.window.move({ workspace = \"$target\", follow = false })"
+    exit 0
+  fi
+  [[ $target == "$cur" ]] && exit 0
+  d=""
+  (( idx >= 0 && tidx >= 0 )) && { (( tidx > idx )) && d=right || d=left; }
+  if [[ $mode == move ]]; then
+    act="hl.dispatch(hl.dsp.window.move({ workspace = \"$target\" }))"
+  else
+    act="hl.dispatch(hl.dsp.focus({ workspace = \"$target\" }))"
+  fi
+  hc eval "$curve; $(anim_lua "$d"); $act; $(anim_lua "")"
+  exit 0
+fi
+
+force_dir=""
+case $mode in
+  goto)
+    target=${2:?usage: ws-step goto <id>}
+    [[ $target == "$cur" ]] && exit 0
+    tidx=$(index_of "$target")
+    ;;
+  prev)
+    (( idx < 0 )) && tidx=0 || tidx=$(( idx - 1 ))
+    if (( tidx < 0 )); then
+      (( wrap )) || exit 0
+      tidx=$(( ${#ids[@]} - 1 ))
+      force_dir=left
+    fi
+    target=${ids[$tidx]}
+    ;;
+  *)
+    (( idx < 0 )) && tidx=0 || tidx=$(( idx + 1 ))
+    if (( tidx >= ${#ids[@]} )); then
+      (( wrap )) || exit 0
+      tidx=0
+      force_dir=right
+    fi
+    target=${ids[$tidx]}
+    ;;
+esac
+[[ -z $target || $target == "$cur" ]] && exit 0
+
+# Workspaces not on the bar (e.g. 11+) get the direction-free style.
+if (( tidx >= 0 )); then
+  switch_to "$tidx" "$force_dir"
+else
+  hc eval "$curve; $(anim_lua ""); hl.dispatch(hl.dsp.focus({ workspace = \"$target\" }))"
+fi

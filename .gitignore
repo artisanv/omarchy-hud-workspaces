@@ -1,0 +1,14 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*~
+
+# Archives / release artifacts
+*.zip
+*.sha256
+
+# State (should never be committed)
+hud-workspaces/

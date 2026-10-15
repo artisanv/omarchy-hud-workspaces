@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# ws-settings — back up, export and restore HUD Workspaces' settings.
+#
+#   ws-settings backup            copy the widget's shell.json entry to
+#                                 ~/.config/omarchy/hud-workspaces/backups/
+#                                 (latest.json, plus one file per day, 14 kept)
+#   ws-settings export [file]     write the settings to a file (default
+#                                 ~/hud-workspaces-settings-<date>.json); prints it
+#   ws-settings import <file>     apply settings from an exported/backup file
+#   ws-settings restore           import the most recent backup that has your
+#                                 cards or rooms in it
+#   ws-settings status            {"entry": bool, "looksReset": bool, "backup": "<date>"}
+#
+# An Omarchy update that rewrites shell.json, or `omarchy refresh shell`, can
+# drop the widget's entry and with it every name, colour, room and
+# preference; these copies make that recoverable. Only known keys are
+# imported, each checked for type.
+
+set -u
+mode=${1:-status}
+cfg=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json
+dir=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/hud-workspaces/backups
+id=swordfish.workspaces
+
+log_file=${XDG_STATE_HOME:-$HOME/.local/state}/hud-workspaces/log
+log() {
+  mkdir -p -- "${log_file%/*}" 2>/dev/null
+  printf '%s ws-settings %s\n' "$(date '+%F %T')" "$*" >>"$log_file" 2>/dev/null
+}
+
+# key → type the value must have once decoded ("json" = JSON text of an
+# array/object, as the widget stores it).
+known='{
+  "order": "json", "labels": "json", "hidden": "json", "rooms": "json",
+  "recentEmoji": "json", "recentColors": "json",
+  "transition": "string", "transitionCurve": "string", "transitionDuration": "number",
+  "transitionDistance": "number", "swipeNatural": "boolean", "wrapSwipe": "boolean",
+  "wrapScroll": "boolean", "keysFollowBar": "boolean", "activeStyle": "string",
+  "resetOnBoot": "boolean", "iconDir": "string"
+}'
+
+entry() {
+  jq -c --arg id "$id" '[.bar.layout[]?[]? | objects | select(.id == $id)][0] // empty' "$cfg" 2>/dev/null
+}
+
+# The settings worth keeping: known keys only.
+settings_of() {
+  jq -c --argjson known "$known" 'with_entries(select(.key as $k | $known | has($k)))'
+}
+
+# Does a settings object hold real customisation (cards or rooms)?
+rich() {
+  jq -e '
+    def parsed(v): if (v | type) == "string" then (try (v | fromjson) catch null) else v end;
+    (parsed(.labels) // {} | length) > 0 or (parsed(.rooms) // [] | length) > 0' >/dev/null 2>&1
+}
+
+do_backup() {
+  local e s
+  e=$(entry) || true
+  [[ -n $e ]] || { log "backup: widget entry not found in shell.json"; return 0; }
+  s=$(settings_of <<<"$e")
+  mkdir -p -- "$dir"
+  printf '%s\n' "$s" >"$dir/latest.json.tmp" && mv -f -- "$dir/latest.json.tmp" "$dir/latest.json"
+  # The daily copy only takes customised states, so a wiped entry that
+  # still gets written to can't push the last good copy out.
+  if rich <<<"$s"; then
+    cp -f -- "$dir/latest.json" "$dir/$(date +%F).json"
+    ls -1 -- "$dir" | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}\.json$' | sort -r | tail -n +15 |
+      while read -r old; do rm -f -- "$dir/$old"; done
+  fi
+}
+
+do_export() {
+  local out=${1:-$HOME/hud-workspaces-settings-$(date +%F).json} e
+  e=$(entry) || true
+  [[ -n $e ]] || { echo "HUD Workspaces isn't on the bar (no entry in $cfg)" >&2; exit 1; }
+  settings_of <<<"$e" | jq . >"$out" || exit 1
+  echo "$out"
+}
+
+do_import() {
+  local file=${1:?usage: ws-settings import <file>} data key type value n=0
+  data=$(jq -c 'if type == "object" then . else error("not an object") end' "$file" 2>/dev/null) ||
+    { echo "Not a HUD Workspaces settings file: $file" >&2; exit 1; }
+  [[ -n $(entry) ]] || { echo "Add HUD Workspaces to the bar first" >&2; exit 1; }
+  while IFS=$'\t' read -r key type; do
+    value=$(jq -c --arg k "$key" '.[$k]' <<<"$data")
+    case $type in
+      json)
+        # Stored as JSON text; accept either text or a real array/object.
+        value=$(jq -c 'if type == "string" then (try fromjson catch null) else . end
+          | if type == "array" or type == "object" then . else empty end' <<<"$value")
+        [[ -n $value ]] || continue
+        (( ${#value} <= 262144 )) || { log "import: $key too large, skipped"; continue; }
+        omarchy bar set "$id" "$key" "$value" >/dev/null || continue ;;
+      string)
+        jq -e 'type == "string" and length <= 512' <<<"$value" >/dev/null || continue
+        omarchy bar set "$id" "$key" "$(jq -r . <<<"$value")" >/dev/null || continue ;;
+      number|boolean)
+        jq -e --arg t "$type" 'type == $t' <<<"$value" >/dev/null || continue
+        omarchy bar set "$id" "$key" "$value" --json >/dev/null || continue ;;
+    esac
+    n=$((n + 1))
+  done < <(jq -r --argjson known "$known" 'keys[] as $k | select($known | has($k)) | [$k, $known[$k]] | @tsv' <<<"$data")
+  log "imported $n settings from $file"
+  echo "Imported $n settings."
+}
+
+latest_rich() {
+  local f
+  [[ -f $dir/latest.json ]] && rich <"$dir/latest.json" && { echo "$dir/latest.json"; return; }
+  for f in $(ls -1 -- "$dir" 2>/dev/null | grep -E '^[0-9-]+\.json$' | sort -r); do
+    rich <"$dir/$f" && { echo "$dir/$f"; return; }
+  done
+}
+
+do_status() {
+  local e has=false reset=false b=""
+  e=$(entry) || true
+  [[ -n $e ]] && has=true
+  local best
+  best=$(latest_rich)
+  if [[ -n $best ]]; then
+    b=$(date -r "$best" '+%F %H:%M')
+    # Rooms are never cleared by the reboot fresh start, so a backup with
+    # rooms next to an entry without any means the entry was wiped.
+    if [[ $has == false ]] || { jq -e '(.rooms // "[]") | (if type == "string" then (try fromjson catch []) else . end) | length > 0' "$best" >/dev/null 2>&1 &&
+        ! jq -e '(.rooms // "[]") | (if type == "string" then (try fromjson catch []) else . end) | length > 0' <<<"$e" >/dev/null 2>&1; }; then
+      reset=true
+    fi
+  fi
+  jq -cn --argjson entry $has --argjson reset $reset --arg backup "$b" \
+    '{entry: $entry, looksReset: $reset, backup: $backup}'
+}
+
+case $mode in
+  backup) do_backup ;;
+  export) do_export "${2:-}" ;;
+  import) do_import "${2:-}" ;;
+  restore)
+    f=$(latest_rich)
+    [[ -n $f ]] || { echo "No backup with cards or rooms in $dir" >&2; exit 1; }
+    do_import "$f" ;;
+  status) do_status ;;
+  *) echo "usage: ws-settings backup | export [file] | import <file> | restore | status" >&2; exit 2 ;;
+esac
