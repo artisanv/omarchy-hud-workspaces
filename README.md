@@ -2,17 +2,19 @@
 
 ![HUD Workspaces bar](assets/screenshot-bar.png)
 
-A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style workspace
-cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
-the order you see on the bar.
+## Screenshots
 
-Version 1.15.0 · requires Omarchy 4 (Hyprland Lua config) · `jq` and `hyprctl` on `PATH`.
+![Screenshot 1](screenshots/screenshot-1.png)
 
-**Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
-Hyprland versions may work; the widget warns in Settings when yours differs from the
-tested one, and problems are written to `~/.local/state/hud-workspaces/log`.
+![Screenshot 2](screenshots/screenshot-2.png)
 
----
+![Screenshot 3](screenshots/screenshot-3.png)
+
+![Screenshot 4](screenshots/screenshot-4.png)
+
+![Screenshot 5](screenshots/screenshot-5.png)
+
+![Screenshot 6](screenshots/screenshot-6.png)
 
 ## Install
 
