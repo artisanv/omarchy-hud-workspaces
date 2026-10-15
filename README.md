@@ -1,5 +1,7 @@
 # HUD Workspaces
 
+![HUD Workspaces bar](assets/screenshot-bar.png)
+
 A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style workspace
 cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
 the order you see on the bar.
