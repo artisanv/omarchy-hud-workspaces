@@ -2362,6 +2362,7 @@ BarWidget {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             text: root.previewId < 0 ? "" : root.displayLabel(root.previewId)
             color: root.previewFocused ? Color.accent : root.previewFg
@@ -2377,6 +2378,7 @@ BarWidget {
           spacing: 0
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: root.previewId < 0 ? ""
               : (root.customName(root.previewId)
@@ -2389,6 +2391,7 @@ BarWidget {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             visible: text.length > 0
             text: root.previewList.length > 0
@@ -2410,6 +2413,7 @@ BarWidget {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: root.previewList.length === 0
         text: "No applications running"
         color: Qt.darker(root.previewFg, 1.5)
@@ -2459,6 +2463,7 @@ BarWidget {
               }
 
               Text {
+                textFormat: Text.PlainText
                 anchors.centerIn: parent
                 visible: rowIcon.source === ""
                 text: {
@@ -2477,6 +2482,7 @@ BarWidget {
               spacing: 0
 
               Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 text: root.previewTitle(modelData) || root.previewAppId(modelData)
                 color: modelData.activated ? Color.accent : root.previewFg
@@ -2486,6 +2492,7 @@ BarWidget {
               }
 
               Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 visible: text.length > 0
                 text: {
@@ -2503,6 +2510,7 @@ BarWidget {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: root.previewOverflow > 0
         text: "+" + root.previewOverflow + " more"
         color: Qt.darker(root.previewFg, 1.6)
@@ -2512,6 +2520,7 @@ BarWidget {
       }
 
       Text {
+        textFormat: Text.PlainText
         text: "Drag a card to reorder"
         color: Util.alpha(root.previewFg, 0.55)
         font.family: root.previewFont
@@ -2670,6 +2679,7 @@ BarWidget {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: emojiText
       visible: cardLabel.icon === "" && cardLabel.emoji !== ""
       anchors.verticalCenter: parent.verticalCenter
@@ -2680,6 +2690,7 @@ BarWidget {
     }
 
     Text {
+      textFormat: Text.PlainText
       visible: cardLabel.label !== ""
       anchors.verticalCenter: parent.verticalCenter
       width: Math.min(implicitWidth, Math.max(0, cardLabel.maxWidth
@@ -2842,6 +2853,7 @@ BarWidget {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             visible: root.draftIcon === ""
             text: root.draftEmoji !== "" ? root.draftEmoji
@@ -2855,6 +2867,7 @@ BarWidget {
         }
 
         Text {
+          textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
           text: "Workspace " + (root.editingId < 0 ? "" : root.numberLabel(root.editingId))
           color: root.previewFg
@@ -2959,6 +2972,7 @@ BarWidget {
             }
 
             Text {
+              textFormat: Text.PlainText
               anchors.centerIn: parent
               visible: catTab.modelData.start !== -2
               text: catTab.modelData.icon
@@ -3040,6 +3054,7 @@ BarWidget {
             }
 
             Text {
+              textFormat: Text.PlainText
               anchors.centerIn: parent
               visible: !parent.modelData.i
               text: parent.modelData.e || ""
@@ -3067,6 +3082,7 @@ BarWidget {
         }
 
         Text {
+          textFormat: Text.PlainText
           anchors.centerIn: parent
           visible: root.emojiResults.length === 0
           width: parent.width - Style.space(16)
@@ -3137,6 +3153,7 @@ BarWidget {
             border.color: selected ? root.previewFg : Util.alpha(root.previewFg, 0.35)
 
             Text {
+              textFormat: Text.PlainText
               visible: parent.modelData === ""
               anchors.centerIn: parent
               text: "⊘"
@@ -3170,6 +3187,7 @@ BarWidget {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             text: "+"
             color: "#ffffff"
@@ -3358,6 +3376,7 @@ BarWidget {
           + (root.customName(root.editingId) || "Workspace " + root.numberLabel(root.editingId))
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: "Delete " + deleteColumn.title + "?"
         elide: Text.ElideRight
@@ -3369,6 +3388,7 @@ BarWidget {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         wrapMode: Text.WordWrap
         color: Util.alpha(root.previewFg, 0.75)
@@ -3392,6 +3412,7 @@ BarWidget {
         spacing: Style.space(6)
 
         Text {
+          textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
           text: "Move all to"
           color: root.previewFg
@@ -3431,6 +3452,7 @@ BarWidget {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.verticalCenter: parent.verticalCenter
             x: Style.space(24)
             width: parent.width - x - winDest.width - Style.space(6)
@@ -3512,6 +3534,7 @@ BarWidget {
   // Transition settings (right-click the + button). Every change applies at
   // once; Preview hops to a neighbouring card and back to show the effect.
   component SectionTitle: Text {
+    textFormat: Text.PlainText
     color: Color.foreground
     font.family: Style.font.family
     font.pixelSize: Style.font.body
@@ -3533,6 +3556,7 @@ BarWidget {
     border.color: selected ? Color.accent : Util.alpha(Color.foreground, 0.25)
 
     Text {
+      textFormat: Text.PlainText
       id: chipText
       anchors.centerIn: parent
       text: chip.label
@@ -3648,6 +3672,7 @@ BarWidget {
               width: parent.width - Style.space(16)
 
               Text {
+                textFormat: Text.PlainText
                 text: modelData.name
                 color: selected ? Color.accent : Color.foreground
                 font.family: Style.font.family
@@ -3657,6 +3682,7 @@ BarWidget {
               }
 
               Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 text: modelData.detail
                 elide: Text.ElideRight
@@ -3715,6 +3741,7 @@ BarWidget {
         }
 
         Text {
+          textFormat: Text.PlainText
           anchors.right: parent.right
           anchors.baseline: durationLabel.baseline
           text: Math.round(durationSlider.liveValue) + " ms"
@@ -3751,6 +3778,7 @@ BarWidget {
         }
 
         Text {
+          textFormat: Text.PlainText
           anchors.right: parent.right
           anchors.baseline: distanceLabel.baseline
           text: root.usesDistance ? Math.round(distanceSlider.liveValue) + "%" : "Glide / Rise only"
@@ -4027,6 +4055,7 @@ BarWidget {
               }
 
               Text {
+                textFormat: Text.PlainText
                 width: parent.width - (roomIcon.visible ? roomIcon.width + parent.spacing : 0)
                 elide: Text.ElideRight
                 text: (!roomIcon.visible && roomRow.modelData.emoji ? roomRow.modelData.emoji + "  " : "") +
@@ -4040,6 +4069,7 @@ BarWidget {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               wrapMode: Text.WordWrap
               maximumLineCount: 2
@@ -4179,6 +4209,7 @@ BarWidget {
                 spacing: Style.space(2)
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   elide: Text.ElideRight
                   text: profileRow.modelData.name +
@@ -4191,6 +4222,7 @@ BarWidget {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   wrapMode: Text.WordWrap
                   maximumLineCount: 2
@@ -4360,6 +4392,7 @@ BarWidget {
       }
 
       Text {
+        textFormat: Text.PlainText
         topPadding: Style.space(4)
         text: "HUD Workspaces"
         color: Color.foreground
@@ -4432,6 +4465,7 @@ BarWidget {
           spacing: Style.space(1)
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             wrapMode: Text.WordWrap
             text: modelData.q
@@ -4451,6 +4485,7 @@ BarWidget {
   }
 
   component BodyText: Text {
+    textFormat: Text.PlainText
     width: parent ? parent.width : 0
     wrapMode: Text.WordWrap
     color: Color.foreground
@@ -5027,6 +5062,7 @@ BarWidget {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.verticalCenter: parent.verticalCenter
             text: "Icon library"
             color: Color.foreground
@@ -5037,6 +5073,7 @@ BarWidget {
         }
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           wrapMode: Text.WordWrap
           text: (root.libraryForId >= 0
@@ -5050,6 +5087,7 @@ BarWidget {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.libraryNotice !== ""
           width: parent.width
           wrapMode: Text.WordWrap
@@ -5106,6 +5144,7 @@ BarWidget {
             }
 
             Text {
+              textFormat: Text.PlainText
               anchors { left: parent.left; right: parent.right; bottom: parent.bottom; margins: 6 }
               horizontalAlignment: Text.AlignHCenter
               elide: Text.ElideMiddle
@@ -5138,6 +5177,7 @@ BarWidget {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.horizontalCenter: parent.horizontalCenter
             text: root.libraryDragOver ? "Drop to add" : "Drag image files here"
             color: root.libraryDragOver ? Color.accent : Util.alpha(Color.foreground, 0.6)

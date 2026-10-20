@@ -150,6 +150,30 @@ done
 grep -q '"omarchy bar set ' "$src/Workspaces.qml" && bad "widget: writes settings in the shell" || ok "widget: writes settings in the shell"
 grep -qE 'roomScript, "launch(-deck)?", String|JSON.stringify\(deck\)\]' "$src/Workspaces.qml" &&
   bad "widget: rooms launched via stdin" || ok "widget: rooms launched via stdin"
+# External text (window titles, app and card names) must never be read as
+# rich text: Qt's default AutoText would load <img src=...> URLs.
+for f in Workspaces.qml DropIndicator.qml; do
+  missing=$(python3 -I - "$src/$f" <<'PY'
+import re, sys
+lines = open(sys.argv[1]).read().split("\n")
+bad = []
+for i, l in enumerate(lines):
+    if re.match(r"^\s*(?:[\w.]+:\s*)?(?:component \w+: )?Text \{\s*$", l):
+        depth, j, ok = 0, i, False
+        while j < len(lines):
+            depth += lines[j].count("{") - lines[j].count("}")
+            if "textFormat: Text.PlainText" in lines[j]:
+                ok = True
+            if depth == 0:
+                break
+            j += 1
+        if not ok:
+            bad.append(str(i + 1))
+print(" ".join(bad))
+PY
+)
+  eq "$f: every Text is plain text" "$missing" ""
+done
 eq "check: reads stdin"             "$(echo '[{"argv":["ls","-la"]}]' | "$src/ws-room" check -)" "ls -la"
 
 echo

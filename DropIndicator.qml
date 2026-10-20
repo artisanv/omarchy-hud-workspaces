@@ -101,6 +101,7 @@ PanelWindow {
           spacing: 0
 
           Text {
+            textFormat: Text.PlainText
             anchors.horizontalCenter: parent.horizontalCenter
             text: root.workspace === 10 ? "0" : String(root.workspace)
             color: Color.accent
@@ -110,6 +111,7 @@ PanelWindow {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.horizontalCenter: parent.horizontalCenter
             text: "workspace"
             color: Util.alpha(Color.foreground, 0.55)

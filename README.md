@@ -20,7 +20,7 @@ A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style 
 cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
 the order you see on the bar.
 
-Version 1.16.2 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
+Version 1.16.3 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
 
 **Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
 Hyprland versions may work; the widget warns in Settings when yours differs from the
@@ -42,7 +42,7 @@ Or from a release zip / folder:
    (the folder name and the `id` in `manifest.json` must both be `swordfish.workspaces`).
 2. Check the download and make the scripts executable:
    ```bash
-   sha256sum -c swordfish-hud-workspaces-v1.16.2.zip.sha256   # next to the zip
+   sha256sum -c swordfish-hud-workspaces-v1.16.3.zip.sha256   # next to the zip
    chmod +x ~/.config/omarchy/plugins/swordfish.workspaces/ws-*
    ```
 3. Put the widget on the bar in place of the stock workspaces widget:
@@ -384,6 +384,9 @@ private to your user:
   files `600`), exports and the log (`~/.local/state/hud-workspaces/`) are only
   readable by you; backups and logs made by older versions are fixed on the next write.
   `shell.json` keeps the permissions it has.
+- **Text is only text.** Window titles, app names and card, room and profile names are
+  always shown as plain text, so a title containing HTML (for example an `<img>` tag
+  pointing at a web address) is displayed as written and never loads anything.
 - **What stays visible:** an app a room starts runs with its normal command line (for
   example `nautilus --new-window ~/Projects/site`), exactly as if you had opened it
   yourself from a launcher.
@@ -481,6 +484,11 @@ the MIT licence; keep it with this plugin, or remove it from your own fork.
 ---
 
 ## Changelog
+
+- **1.16.3**: Security fix from the marketplace review: window titles in the hover preview
+  (and every other text in the widget) are shown as plain text. Qt's default would read a
+  title containing an HTML `<img>` tag as rich text and fetch the image from its web
+  address when the preview opened. A test checks every text item.
 
 - **1.16.2**: Only the active profile is marked **● Active** and locked. Before, any profile
   whose cards were all on the bar (for example after saving a smaller profile from the same
