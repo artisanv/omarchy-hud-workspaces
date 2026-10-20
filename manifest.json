@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "swordfish.workspaces",
   "name": "HUD Workspaces",
-  "version": "1.16.1",
+  "version": "1.16.2",
   "author": "Nasser Al-Ostath",
   "description": "HUD-geometric workspace cards with hover room preview, drag-reorder, name, emoji or custom icon and colour per workspace, window-drop, saved rooms",
   "kinds": [

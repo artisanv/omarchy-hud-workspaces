@@ -20,7 +20,7 @@ A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style 
 cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
 the order you see on the bar.
 
-Version 1.16.1 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
+Version 1.16.2 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
 
 **Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
 Hyprland versions may work; the widget warns in Settings when yours differs from the
@@ -42,7 +42,7 @@ Or from a release zip / folder:
    (the folder name and the `id` in `manifest.json` must both be `swordfish.workspaces`).
 2. Check the download and make the scripts executable:
    ```bash
-   sha256sum -c swordfish-hud-workspaces-v1.16.1.zip.sha256   # next to the zip
+   sha256sum -c swordfish-hud-workspaces-v1.16.2.zip.sha256   # next to the zip
    chmod +x ~/.config/omarchy/plugins/swordfish.workspaces/ws-*
    ```
 3. Put the widget on the bar in place of the stock workspaces widget:
@@ -204,8 +204,9 @@ colour and apps, saved as one thing. Opening it gives you exactly that bar back.
   one of its cards, the button says **Restore** and brings back only that card and its
   apps. Open is also locked while a profile is still starting its apps. If two identical
   cards are ever on the bar, the profile refuses to open and tells you which one to delete
-  instead of guessing. Opening a different profile replaces the active one; saving a
-  profile makes it the active one.
+  instead of guessing. Opening a different profile replaces the active one, even when its
+  cards are already on the bar (they are reused, never copied); saving a profile makes it
+  the active one.
 - **Delete**: **✕** next to the profile.
 
 Example: cards 🧑‍💻 Code (Files + terminal in `~/Projects/site`), 🎵 Music (Spotify) and
@@ -480,6 +481,11 @@ the MIT licence; keep it with this plugin, or remove it from your own fork.
 ---
 
 ## Changelog
+
+- **1.16.2**: Only the active profile is marked **● Active** and locked. Before, any profile
+  whose cards were all on the bar (for example after saving a smaller profile from the same
+  bar) was also marked Active and locked, so you couldn't switch back to it. Switching
+  reuses those cards, so nothing is duplicated.
 
 - **1.16.1**: `python3` is listed as a requirement (it carries room commands to Hyprland's
   socket). Without it, rooms still open through `hyprctl`, with a note in the log that

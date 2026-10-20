@@ -1419,11 +1419,13 @@ BarWidget {
     return !!p && root.activeProfile.name !== "" && root.sameName(p.name, root.activeProfile.name)
   }
 
-  // Every one of its cards is on the bar: the profile is open, and Open is
-  // locked so it can't be opened a second time.
+  // The active profile with every one of its cards on the bar: it is open,
+  // and Open is locked so it can't be opened a second time. Another profile
+  // whose cards happen to be on the bar can still be opened (switched to):
+  // it reuses those cards, so nothing is duplicated.
   function profileOnBar(p) {
     var n = p && p.rooms ? (p.rooms.length || 0) : 0
-    return n > 0 && root.reusedIds(p).length === n
+    return n > 0 && root.isActiveProfile(p) && root.reusedIds(p).length === n
   }
 
   // Active, but some of its cards were deleted since: Open brings back just those.
@@ -4180,8 +4182,8 @@ BarWidget {
                   width: parent.width
                   elide: Text.ElideRight
                   text: profileRow.modelData.name +
-                    (root.profileOnBar(profileRow.modelData) ? "   \u25cf Active" : "")
-                  color: root.profileOnBar(profileRow.modelData) ? Color.accent : Color.foreground
+                    (root.isActiveProfile(profileRow.modelData) ? "   \u25cf Active" : "")
+                  color: root.isActiveProfile(profileRow.modelData) ? Color.accent : Color.foreground
                   font.family: Style.font.family
                   font.pixelSize: Style.font.body
                   font.bold: true
