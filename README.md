@@ -16,6 +16,18 @@
 
 ![Screenshot 6](screenshots/screenshot-6.png)
 
+A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style workspace
+cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
+the order you see on the bar.
+
+Version 1.16.0 · requires Omarchy 4 (Hyprland Lua config) · `jq` and `hyprctl` on `PATH`.
+
+**Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
+Hyprland versions may work; the widget warns in Settings when yours differs from the
+tested one, and problems are written to `~/.local/state/hud-workspaces/log`.
+
+---
+
 ## Install
 
 From git (recommended):
@@ -30,7 +42,7 @@ Or from a release zip / folder:
    (the folder name and the `id` in `manifest.json` must both be `swordfish.workspaces`).
 2. Check the download and make the scripts executable:
    ```bash
-   sha256sum -c swordfish-hud-workspaces-v1.15.0.zip.sha256   # next to the zip
+   sha256sum -c swordfish-hud-workspaces-v1.16.0.zip.sha256   # next to the zip
    chmod +x ~/.config/omarchy/plugins/swordfish.workspaces/ws-*
    ```
 3. Put the widget on the bar in place of the stock workspaces widget:
@@ -172,6 +184,39 @@ Example: a workspace with Files in `~/Projects/site` and a terminal opened there
 as a room, reopens as Files at `~/Projects/site` plus a terminal in `~/Projects/site`.
 Rooms are never cleared by the fresh start on reboot.
 
+## Profiles
+
+A profile is a whole deck: several cards, in bar order, each with its name, emoji or icon,
+colour and apps, saved as one thing. Opening it gives you exactly that bar back.
+
+- **Save**: right-click **+** → **Profiles**. Pick the cards to include (cards with apps or
+  a label start picked; click a card to toggle it), type a name and press **Save**. Saving
+  again under the same name updates the profile.
+- **Open**: **Open** next to the profile. Its cards take the bar, in the saved order, and
+  their apps start on them; you land on the first one. Empty cards that aren't in the
+  profile are removed. If other cards still have apps open, you're asked first:
+  - **Close apps**: those apps are asked to close (as with Super+W; unsaved work prompts
+    as usual) and each card goes once its last window is gone.
+  - **Keep them**: those cards stay, after the profile's cards.
+- **One at a time, never twice**: the profile on the bar is marked **● Active**. While all
+  its cards are on the bar its button says **On** and is locked, so it can't be opened a
+  second time. Its cards stay its own even if you rename or recolour them. If you delete
+  one of its cards, the button says **Restore** and brings back only that card and its
+  apps. Open is also locked while a profile is still starting its apps. If two identical
+  cards are ever on the bar, the profile refuses to open and tells you which one to delete
+  instead of guessing. Opening a different profile replaces the active one; saving a
+  profile makes it the active one.
+- **Delete**: **✕** next to the profile.
+
+Example: cards 🧑‍💻 Code (Files + terminal in `~/Projects/site`), 🎵 Music (Spotify) and
+💬 Chat (Signal), saved as "Work". After a reboot, open "Work" and the bar is exactly
+those three cards with those apps, nothing else.
+
+Each card in a profile is stored like a room, so the same rules apply to what comes back
+(folders yes, contents no). A profile holds up to 10 cards; the workspaces it uses are
+the free ones (no windows) from 1 upward, and Super+number follows the bar, so Super+1 is
+the profile's first card. Profiles are never cleared by the fresh start on reboot.
+
 ### Transition settings (right-click +)
 
 **Transition**: how one workspace gives way to the next.
@@ -296,6 +341,8 @@ be set from a terminal, e.g. `omarchy bar set swordfish.workspaces transition sl
 | `activeStyle` | `solid` / `outline` | `solid` |
 | `resetOnBoot` | `true` / `false`: default cards after each reboot | `true` |
 | `rooms` | saved rooms (JSON list), see [Rooms](#rooms) | `[]` |
+| `profiles` | saved decks (JSON list of `{name, rooms}`), see [Profiles](#profiles) | `[]` |
+| `activeProfile` | internal: the profile on the bar and its workspaces (JSON) | |
 | `recentEmoji` | recently used emoji (JSON list, newest first) | `[]` |
 | `recentColors` | recently used custom colours (JSON list) | `[]` |
 | `lastBoot` | internal: the boot the widget last saw | |
@@ -303,7 +350,7 @@ be set from a terminal, e.g. `omarchy bar set swordfish.workspaces transition sl
 Numbers and booleans need `--json`, e.g. `omarchy bar set swordfish.workspaces transitionDuration 600 --json`.
 
 Stored data is bounded when read: labels only for workspaces 1–10 with short strings, at
-most 50 rooms of 30 apps, 32 recent emoji/colours. All writes to `shell.json` go through
+most 50 rooms of 30 apps, 20 profiles of 10 cards, 32 recent emoji/colours. All writes to `shell.json` go through
 one queue, so two quick edits can't overwrite each other.
 
 ## Backup and restore
@@ -321,6 +368,24 @@ change the widget copies its settings to `~/.config/omarchy/hud-workspaces/backu
   type-checked.
 
 From a terminal: `ws-settings backup | export [file] | import <file> | restore | status`.
+
+## Privacy
+
+Rooms and profiles hold folder paths and window titles, so HUD Workspaces keeps them
+private to your user:
+
+- **Nothing on command lines.** Command-line arguments can be read by every local user
+  (`ps`), so the widget saves its settings inside the shell (no `omarchy bar set`
+  processes), hands rooms to `ws-room` on stdin, and `ws-room` builds JSON with `jq`
+  reading stdin and talks to Hyprland over its socket instead of `hyprctl` arguments.
+  `ws-settings import` edits `shell.json` directly from a private temp file.
+- **Private files.** Backups (`~/.config/omarchy/hud-workspaces/backups/`, folder `700`,
+  files `600`), exports and the log (`~/.local/state/hud-workspaces/`) are only
+  readable by you; backups and logs made by older versions are fixed on the next write.
+  `shell.json` keeps the permissions it has.
+- **What stays visible:** an app a room starts runs with its normal command line (for
+  example `nautilus --new-window ~/Projects/site`), exactly as if you had opened it
+  yourself from a launcher.
 
 ## `ws-step`
 
@@ -354,9 +419,15 @@ Captures and reopens rooms; the widget calls it, but it works from a terminal to
 
 ```
 ws-room capture <workspace>          print the apps on a workspace as JSON
-ws-room launch <workspace> <json>    switch there and start those apps on it
-ws-room check <json>                 show what each app would be started with (runs nothing)
+ws-room launch <workspace> [-]       switch there and start the apps given on stdin
+ws-room capture-deck <ws>...         capture several workspaces: {"<ws>": [apps]}
+ws-room launch-deck [-]              open several rooms at once, from stdin: [{"ws": 3, "apps": [...]}]
+ws-room check [-]                    show what each app would be started with (runs nothing)
 ```
+
+The JSON is read as one line from stdin (`-`, the default), e.g.
+`ws-room check - < room.json`. Passing it as an argument still works, but then it is
+visible to other users in `ps`.
 
 Rooms are stored commands, so they're handled as data: each app is saved as an argument
 list (never a shell string), every argument is quoted when it starts, the program must
@@ -409,6 +480,18 @@ the MIT licence; keep it with this plugin, or remove it from your own fork.
 ---
 
 ## Changelog
+
+- **1.16.0**: **Privacy fixes** from the marketplace review: room data (folders, titles,
+  commands) no longer appears in process arguments. Settings are written inside the shell,
+  rooms reach `ws-room` on stdin, `ws-room` uses Hyprland's socket, and `ws-settings
+  import` writes `shell.json` itself. Backups, exports and logs are private (`700`/`600`),
+  existing ones are fixed. New [Privacy](#privacy) section.
+  **Profiles**: save a whole deck of cards (names, emoji/icons, colours, apps,
+  order) as one profile and reopen exactly that bar in one click, closing or keeping the
+  other cards' apps. One profile is active at a time and can't be opened twice (locked while
+  on the bar or starting; Restore brings back deleted cards; identical copies are refused). New Profiles tab. `ws-room capture-deck` / `launch-deck`; launching
+  several rooms at once shares one window watcher, so two rooms with the same app (e.g. two
+  terminals) don't take each other's windows. Profiles are part of backups and export.
 
 - **1.15.0**: Hardening and update-proofing, from an external review.
   - Rooms store argument lists, not shell strings; every argument is quoted at launch,

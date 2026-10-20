@@ -10,6 +10,14 @@
 #   ws-settings restore           import the most recent backup that has your
 #                                 cards or rooms in it
 #   ws-settings status            {"entry": bool, "looksReset": bool, "backup": "<date>"}
+#   ws-settings apply             write settings given as one line of JSON on
+#                                 stdin (the widget's fallback writer)
+#
+# Settings hold folder paths and window titles, so they are private: files
+# and folders written here are only readable by you (umask 077, backups
+# folder 700), and values are never passed as command-line arguments, which
+# other local users can read in `ps`; shell.json is edited directly with jq
+# reading the values from a private temp file.
 #
 # An Omarchy update that rewrites shell.json, or `omarchy refresh shell`, can
 # drop the widget's entry and with it every name, colour, room and
@@ -17,6 +25,7 @@
 # imported, each checked for type.
 
 set -u
+umask 077
 mode=${1:-status}
 cfg=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json
 dir=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/hud-workspaces/backups
@@ -24,14 +33,14 @@ id=swordfish.workspaces
 
 log_file=${XDG_STATE_HOME:-$HOME/.local/state}/hud-workspaces/log
 log() {
-  mkdir -p -- "${log_file%/*}" 2>/dev/null
-  printf '%s ws-settings %s\n' "$(date '+%F %T')" "$*" >>"$log_file" 2>/dev/null
+  ( umask 077; mkdir -p -- "${log_file%/*}" && chmod 700 -- "${log_file%/*}"
+    printf '%s ws-settings %s\n' "$(date '+%F %T')" "$*" >>"$log_file"; chmod 600 -- "$log_file" ) 2>/dev/null
 }
 
 # key → type the value must have once decoded ("json" = JSON text of an
 # array/object, as the widget stores it).
 known='{
-  "order": "json", "labels": "json", "hidden": "json", "rooms": "json",
+  "order": "json", "labels": "json", "hidden": "json", "rooms": "json", "profiles": "json", "activeProfile": "string",
   "recentEmoji": "json", "recentColors": "json",
   "transition": "string", "transitionCurve": "string", "transitionDuration": "number",
   "transitionDistance": "number", "swipeNatural": "boolean", "wrapSwipe": "boolean",
@@ -52,7 +61,8 @@ settings_of() {
 rich() {
   jq -e '
     def parsed(v): if (v | type) == "string" then (try (v | fromjson) catch null) else v end;
-    (parsed(.labels) // {} | length) > 0 or (parsed(.rooms) // [] | length) > 0' >/dev/null 2>&1
+    (parsed(.labels) // {} | length) > 0 or (parsed(.rooms) // [] | length) > 0
+    or (parsed(.profiles) // [] | length) > 0' >/dev/null 2>&1
 }
 
 do_backup() {
@@ -61,6 +71,9 @@ do_backup() {
   [[ -n $e ]] || { log "backup: widget entry not found in shell.json"; return 0; }
   s=$(settings_of <<<"$e")
   mkdir -p -- "$dir"
+  # Backups from before 1.16 were created world-readable.
+  chmod 700 -- "$dir" "${dir%/*}" 2>/dev/null
+  find "$dir" -maxdepth 1 -type f -exec chmod 600 -- {} + 2>/dev/null
   printf '%s\n' "$s" >"$dir/latest.json.tmp" && mv -f -- "$dir/latest.json.tmp" "$dir/latest.json"
   # The daily copy only takes customised states, so a wiped entry that
   # still gets written to can't push the last good copy out.
@@ -79,32 +92,59 @@ do_export() {
   echo "$out"
 }
 
+# Known keys only, each checked for type, from a settings object on stdin.
+# JSON-text keys are stored as text, the way the widget writes them.
+clean_settings() {
+  jq -c --argjson known "$known" '
+    to_entries | map(select(.key as $k | $known | has($k)) | . as $e | $known[$e.key] as $t
+      | if $t == "json" then
+          (.value | if type == "string" then (try fromjson catch null) else . end) as $v
+          | if ($v | type) == "array" or ($v | type) == "object" then
+              ($v | tojson) as $txt | if ($txt | length) <= 262144 then {key, value: $txt} else empty end
+            else empty end
+        elif $t == "string" then
+          if (.value | type) == "string" and (.value | length) <= 512 then . else empty end
+        else
+          if (.value | type) == $t then . else empty end
+        end) | from_entries'
+}
+
+# Merge a settings object (stdin) into the widget's entry in shell.json.
+# Prints how many settings were written.
+write_settings() {
+  local tmp vals n
+  [[ -n $(entry) ]] || { echo "Add HUD Workspaces to the bar first" >&2; return 1; }
+  vals=$(mktemp "${cfg%/*}/.hud-settings.XXXXXX") || return 1
+  tmp=$(mktemp "${cfg%/*}/.shell.json.XXXXXX") || { rm -f -- "$vals"; return 1; }
+  clean_settings >"$vals" || { rm -f -- "$vals" "$tmp"; return 1; }
+  n=$(jq 'length' "$vals")
+  if jq --slurpfile s "$vals" --arg id "$id" \
+      '(.bar.layout[]?[]? | objects | select(.id == $id)) |= (. + $s[0])' "$cfg" >"$tmp" &&
+      [[ -s $tmp ]]; then
+    chmod --reference="$cfg" -- "$tmp" 2>/dev/null
+    mv -f -- "$tmp" "$cfg"
+  else
+    rm -f -- "$tmp" "$vals"
+    return 1
+  fi
+  rm -f -- "$vals"
+  echo "$n"
+}
+
 do_import() {
-  local file=${1:?usage: ws-settings import <file>} data key type value n=0
-  data=$(jq -c 'if type == "object" then . else error("not an object") end' "$file" 2>/dev/null) ||
+  local file=${1:?usage: ws-settings import <file>} n
+  jq -e 'type == "object"' "$file" >/dev/null 2>&1 ||
     { echo "Not a HUD Workspaces settings file: $file" >&2; exit 1; }
-  [[ -n $(entry) ]] || { echo "Add HUD Workspaces to the bar first" >&2; exit 1; }
-  while IFS=$'\t' read -r key type; do
-    value=$(jq -c --arg k "$key" '.[$k]' <<<"$data")
-    case $type in
-      json)
-        # Stored as JSON text; accept either text or a real array/object.
-        value=$(jq -c 'if type == "string" then (try fromjson catch null) else . end
-          | if type == "array" or type == "object" then . else empty end' <<<"$value")
-        [[ -n $value ]] || continue
-        (( ${#value} <= 262144 )) || { log "import: $key too large, skipped"; continue; }
-        omarchy bar set "$id" "$key" "$value" >/dev/null || continue ;;
-      string)
-        jq -e 'type == "string" and length <= 512' <<<"$value" >/dev/null || continue
-        omarchy bar set "$id" "$key" "$(jq -r . <<<"$value")" >/dev/null || continue ;;
-      number|boolean)
-        jq -e --arg t "$type" 'type == $t' <<<"$value" >/dev/null || continue
-        omarchy bar set "$id" "$key" "$value" --json >/dev/null || continue ;;
-    esac
-    n=$((n + 1))
-  done < <(jq -r --argjson known "$known" 'keys[] as $k | select($known | has($k)) | [$k, $known[$k]] | @tsv' <<<"$data")
+  n=$(write_settings <"$file") || exit 1
   log "imported $n settings from $file"
   echo "Imported $n settings."
+}
+
+do_apply() {
+  local line n
+  IFS= read -r line || [[ -n $line ]] || exit 1
+  n=$(jq -e 'if type == "object" then . else error end' <<<"$line" 2>/dev/null | write_settings) || exit 1
+  log "applied $n settings"
 }
 
 latest_rich() {
@@ -143,5 +183,6 @@ case $mode in
     [[ -n $f ]] || { echo "No backup with cards or rooms in $dir" >&2; exit 1; }
     do_import "$f" ;;
   status) do_status ;;
-  *) echo "usage: ws-settings backup | export [file] | import <file> | restore | status" >&2; exit 2 ;;
+  apply) do_apply ;;
+  *) echo "usage: ws-settings backup | export [file] | import <file> | restore | status | apply" >&2; exit 2 ;;
 esac

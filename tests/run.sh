@@ -118,6 +118,40 @@ eq "rest of bindings.lua kept"    "$(cat "$cfg/hypr/bindings.lua")" "-- my binds
 echo "ws-settings import validation"
 eq "rejects a non-object" "$("$src/ws-settings" import <(echo '[1]') 2>&1 | head -c 30)" "Not a HUD Workspaces settings "
 
+# Import writes shell.json itself: known keys only, types checked, JSON kept
+# as text, file stays private.
+scfg=$tmp/scfg
+mkdir -p "$scfg/omarchy"
+echo '{"bar":{"layout":{"left":[{"id":"swordfish.workspaces","order":"[1,2]"}],"center":[],"right":[]}}}' >"$scfg/omarchy/shell.json"
+chmod 600 "$scfg/omarchy/shell.json"
+ws_settings() { XDG_CONFIG_HOME=$scfg XDG_STATE_HOME=$tmp/state "$src/ws-settings" "$@"; }
+echo '{"rooms":[{"name":"A","apps":[]}],"profiles":"[{\"name\":\"P\",\"rooms\":[]}]","wrapSwipe":"yes","evil":1,"transitionDuration":600}' >"$tmp/imp.json"
+ws_settings import "$tmp/imp.json" >/dev/null
+e=$(jq -c '.bar.layout.left[0]' "$scfg/omarchy/shell.json")
+eq "import: rooms stored as text"   "$(jq -r '.rooms | type' <<<"$e")" string
+eq "import: profiles kept"          "$(jq -r '.profiles | fromjson | .[0].name' <<<"$e")" P
+eq "import: wrong type dropped"     "$(jq -r 'has("wrapSwipe")' <<<"$e")" false
+eq "import: unknown key dropped"    "$(jq -r 'has("evil")' <<<"$e")" false
+eq "import: number kept"            "$(jq -r '.transitionDuration' <<<"$e")" 600
+eq "import: other keys kept"        "$(jq -r '.order' <<<"$e")" "[1,2]"
+eq "import: shell.json still 600"   "$(stat -c %a "$scfg/omarchy/shell.json")" 600
+echo '{"hidden":"[3]"}' | ws_settings apply
+eq "apply: reads stdin"             "$(jq -r '.bar.layout.left[0].hidden' "$scfg/omarchy/shell.json")" "[3]"
+mkdir -p "$scfg/omarchy/hud-workspaces/backups"; chmod 755 "$scfg/omarchy/hud-workspaces/backups"
+touch "$scfg/omarchy/hud-workspaces/backups/2026-01-01.json"; chmod 644 "$scfg/omarchy/hud-workspaces/backups/2026-01-01.json"
+ws_settings backup
+eq "backup: folder private"         "$(stat -c %a "$scfg/omarchy/hud-workspaces/backups")" 700
+eq "backup: files private"          "$(stat -c %a "$scfg/omarchy/hud-workspaces/backups"/*.json | sort -u | tr '\n' ' ')" "600 "
+
+echo "no stored data on command lines"
+for f in ws-room ws-settings; do
+  grep -qE 'omarchy bar set|hyprctl eval' "$src/$f" && bad "$f: no omarchy bar set / hyprctl eval" || ok "$f: no omarchy bar set / hyprctl eval"
+done
+grep -q '"omarchy bar set ' "$src/Workspaces.qml" && bad "widget: writes settings in the shell" || ok "widget: writes settings in the shell"
+grep -qE 'roomScript, "launch(-deck)?", String|JSON.stringify\(deck\)\]' "$src/Workspaces.qml" &&
+  bad "widget: rooms launched via stdin" || ok "widget: rooms launched via stdin"
+eq "check: reads stdin"             "$(echo '[{"argv":["ls","-la"]}]' | "$src/ws-room" check -)" "ls -la"
+
 echo
 echo "$pass passed, $fail failed"
 (( fail == 0 ))

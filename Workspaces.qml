@@ -206,34 +206,102 @@ BarWidget {
   // Every write goes through this one queue and runs strictly after the
   // previous one, so two quick edits (a label and a reorder, say) can't
   // read-modify-write shell.json at the same time and lose one of them.
-  // After the queue drains, the widget's entry is copied to a backup file
-  // (see settingsBackup).
+  // Settings are written inside the shell (bar.shell.updateEntryInline, as
+  // the stock clock does), never as command-line arguments, which other
+  // local users can read: names, folders and window titles stay out of
+  // `ps`. Shell commands in the queue (ws-step apply, ws-settings) carry no
+  // stored data. After the queue drains, the widget's entry is copied to a
+  // backup file (see settingsBackup).
   property var writeQueue: []
 
+  // One setting to write; `json` means `value` is JSON text (a number or
+  // boolean) rather than a plain string.
   function barSet(key, value, json) {
-    return "omarchy bar set " + Util.shellQuote(String(root.bar.pluginId)) + " " + key + " " +
-      Util.shellQuote(String(value)) + (json ? " --json" : "")
+    var v = String(value)
+    if (json) {
+      try {
+        v = JSON.parse(v)
+      } catch (e) {
+        v = String(value)
+      }
+    }
+    return { key: String(key), value: v }
   }
 
-  function persist(cmds) {
+  function persist(steps) {
     if (!root.bar) return
-    var list = Array.isArray(cmds) ? cmds : [cmds]
+    var list = Array.isArray(steps) ? steps : [steps]
     if (list.length === 0) return
-    root.writeQueue = root.writeQueue.concat([list.join(" && ")])
+    root.writeQueue = root.writeQueue.concat([list])
     root.pumpWrites()
   }
 
   function pumpWrites() {
-    if (shellWriter.running) return
+    if (shellWriter.running || writeSettle.running) return
     if (root.writeQueue.length === 0) {
       if (root.backupPending) root.writeBackup()
       return
     }
-    var next = root.writeQueue[0]
+    var steps = root.writeQueue[0]
     root.writeQueue = root.writeQueue.slice(1)
     root.backupPending = true
-    shellWriter.command = ["bash", "-c", next]
-    shellWriter.running = true
+    var sets = steps.filter(function(x) { return typeof x === "object" })
+    var cmds = steps.filter(function(x) { return typeof x === "string" })
+    if (sets.length > 0 && !root.writeSettings(sets)) {
+      Qt.callLater(root.pumpWrites)
+      return
+    }
+    if (cmds.length === 0) {
+      Qt.callLater(root.pumpWrites)
+      return
+    }
+    shellWriter.command = ["bash", "-c", cmds.join(" && ")]
+    // Give the shell a moment to save shell.json; ws-step reads the file.
+    if (sets.length > 0) writeSettle.restart()
+    else shellWriter.running = true
+  }
+
+  Timer {
+    id: writeSettle
+    interval: 250
+    onTriggered: shellWriter.running = true
+  }
+
+  // Apply settings to the widget's entry: locally first (so the next write
+  // builds on it), then through the shell. If this shell has no such API,
+  // ws-settings writes them, reading the values from stdin.
+  function writeSettings(sets) {
+    var entry = {}
+    for (var k in root.settings) if (k !== "id") entry[k] = root.settings[k]
+    var changes = {}
+    for (var i = 0; i < sets.length; i++) {
+      entry[sets[i].key] = sets[i].value
+      changes[sets[i].key] = sets[i].value
+    }
+    root.settings = entry
+    var api = root.bar && root.bar.shell
+    if (api && typeof api.updateEntryInline === "function") {
+      api.updateEntryInline(root.moduleName, entry)
+      return true
+    }
+    root.logLine("shell has no updateEntryInline; writing settings with ws-settings")
+    settingsStdin.payload = JSON.stringify(changes)
+    settingsStdin.running = true
+    return true
+  }
+
+  Process {
+    id: settingsStdin
+    property string payload: ""
+    command: [root.settingsScript, "apply"]
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
+    onExited: function(code) {
+      if (code !== 0) root.logLine("ws-settings apply exited " + code)
+    }
   }
 
   Process {
@@ -253,10 +321,27 @@ BarWidget {
   readonly property string logFile: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") +
     "/hud-workspaces/log"
 
+  // The message goes over stdin (never as an argument) to a log only you
+  // can read.
   function logLine(msg) {
-    Quickshell.execDetached(["sh", "-c",
-      'mkdir -p -- "$(dirname -- "$1")" && printf "%s widget %s\\n" "$(date "+%F %T")" "$2" >> "$1"',
-      "sh", root.logFile, String(msg).replace(/[\r\n]+/g, " ").slice(0, 500)])
+    var p = logWriterComponent.createObject(root, { payload: String(msg).replace(/[\r\n]+/g, " ").slice(0, 500) })
+    if (p) p.running = true
+  }
+
+  Component {
+    id: logWriterComponent
+    Process {
+      property string payload: ""
+      command: ["sh", "-c",
+        'umask 077; d=$(dirname -- "$1"); mkdir -p -- "$d" && chmod 700 -- "$d"; ' +
+        'IFS= read -r m; printf "%s widget %s\\n" "$(date "+%F %T")" "$m" >> "$1"; chmod 600 -- "$1"', "sh", root.logFile]
+      stdinEnabled: true
+      onStarted: {
+        write(payload + "\n")
+        payload = ""
+      }
+      onExited: destroy()
+    }
   }
 
   // ---- Backups, integration status, update checks ----
@@ -1080,6 +1165,8 @@ BarWidget {
       cmds.push(root.barSet("labels", "{}"))
       cmds.push(root.barSet("hidden", "[]"))
     }
+    root.localActive = { name: "", ids: [] }
+    cmds.push(root.barSet("activeProfile", ""))
     cmds.push(root.barSet("lastBoot", bootId))
     root.persist(cmds)
   }
@@ -1229,7 +1316,7 @@ BarWidget {
     root.persistAll(order, hidden, labels)
     root.roomNotice = ""
     root.settingsOpen = false
-    Quickshell.execDetached([root.roomScript, "launch", String(id), JSON.stringify(room.apps || [])])
+    root.launchRooms([{ ws: id, apps: room.apps || [] }])
   }
 
   function deleteRoom(index) {
@@ -1258,8 +1345,481 @@ BarWidget {
     }).join(" \u00b7 ")
   }
 
-  // Panel tabs (right-click +): settings | rooms | guide | about
+  // ---- Profiles ----
+  // A profile is a whole deck: the cards you pick from the bar, in bar
+  // order, each saved like a room (name, emoji or icon, colour, apps).
+  // Opening one replaces the bar with exactly those cards. Saved as JSON
+  // text under `profiles`: [{ name, rooms: [room, ...] }]. Like rooms, never
+  // cleared by the fresh start on reboot.
+  readonly property int maxProfiles: 20
+  property var localProfiles: null
+  readonly property var savedProfiles: {
+    var raw = root.setting("profiles", [])
+    if (typeof raw === "string") {
+      try {
+        raw = JSON.parse(raw)
+      } catch (e) {
+        raw = []
+      }
+    }
+    if (!Array.isArray(raw)) return []
+    return raw.filter(function(p) { return p && typeof p === "object" && !Array.isArray(p) })
+      .slice(0, root.maxProfiles).map(function(p) {
+        var rooms = []
+        var rawRooms = Array.isArray(p.rooms) ? p.rooms : []
+        for (var i = 0; i < rawRooms.length && rooms.length < 10; i++) {
+          var r = rawRooms[i]
+          if (!r || typeof r !== "object" || Array.isArray(r)) continue
+          var room = {}
+          for (var k in r) room[k] = r[k]
+          room.name = String(r.name || "").slice(0, 40)
+          var apps = []
+          var rawApps = Array.isArray(r.apps) ? r.apps : []
+          for (var j = 0; j < rawApps.length && apps.length < 30; j++) {
+            if (rawApps[j] && typeof rawApps[j] === "object") apps.push(rawApps[j])
+          }
+          room.apps = apps
+          rooms.push(room)
+        }
+        return { name: String(p.name || "Profile").slice(0, 40), rooms: rooms }
+      })
+  }
+  onSavedProfilesChanged: root.localProfiles = null
+  readonly property var profiles: root.localProfiles !== null ? root.localProfiles : root.savedProfiles
+  property string profileNotice: ""
+  property var profilePick: ({})      // workspace id -> picked for the next save
+  property var pendingProfile: null   // profile waiting for its apps to be captured
+  property int profileConfirm: -1     // profile asking what to do with open apps
+
+  // The profile on the bar now and the workspaces its cards use, so opening
+  // it again tops it up instead of opening a second copy. Saved under
+  // `activeProfile` as JSON text { name, ids }; dropped on a new boot.
+  property var localActive: null
+  readonly property var savedActive: {
+    var raw = root.setting("activeProfile", "")
+    if (typeof raw === "string") {
+      try {
+        raw = raw === "" ? null : JSON.parse(raw)
+      } catch (e) {
+        raw = null
+      }
+    }
+    if (!raw || typeof raw !== "object" || !Array.isArray(raw.ids)) return { name: "", ids: [] }
+    var ids = raw.ids.map(Number).filter(function(n) { return n >= 1 && n <= 10 }).slice(0, 10)
+    return { name: String(raw.name || ""), ids: ids }
+  }
+  onSavedActiveChanged: root.localActive = null
+  readonly property var activeProfile: root.localActive !== null ? root.localActive : root.savedActive
+
+  function sameName(a, b) {
+    return String(a).toLowerCase() === String(b).toLowerCase()
+  }
+
+  function isActiveProfile(p) {
+    return !!p && root.activeProfile.name !== "" && root.sameName(p.name, root.activeProfile.name)
+  }
+
+  // Every one of its cards is on the bar: the profile is open, and Open is
+  // locked so it can't be opened a second time.
+  function profileOnBar(p) {
+    var n = p && p.rooms ? (p.rooms.length || 0) : 0
+    return n > 0 && root.reusedIds(p).length === n
+  }
+
+  // Active, but some of its cards were deleted since: Open brings back just those.
+  function profilePartial(p) {
+    return root.isActiveProfile(p) && !root.profileOnBar(p)
+  }
+
+  function setActiveProfile(name, ids) {
+    root.localActive = { name: String(name), ids: ids.slice() }
+    root.persist(root.barSet("activeProfile", JSON.stringify(root.localActive)))
+  }
+
+  // Does the card on workspace `id` look like `room` (same name, emoji or
+  // icon, colour)? A room with none of those can't be recognised this way.
+  function cardMatchesRoom(id, room) {
+    var card = root.cardAsRoom(id)
+    var keys = ["name", "emoji", "icon", "color"]
+    var labelled = false
+    for (var i = 0; i < keys.length; i++) {
+      var want = String(room[keys[i]] || "")
+      if (keys[i] === "emoji" && root.validIcon(room.icon) !== "") want = ""
+      if (want !== "") labelled = true
+      if (String(card[keys[i]] || "") !== want) return false
+    }
+    return labelled
+  }
+
+  // For each of the profile's cards, the workspace already showing it, or
+  // -1, plus the names of cards that are on the bar more than once. The
+  // active profile's own workspaces always count as its cards, even after a
+  // rename or new colour. Other cards are recognised by their look (same
+  // name, emoji or icon, colour); when two cards look the same nothing is
+  // guessed: the profile can't open until one copy is deleted.
+  function profileMatch(p) {
+    var rooms = p && p.rooms ? p.rooms : []
+    var n = rooms.length || 0
+    var slots = []
+    var dupes = []
+    var used = {}
+    var rec = root.isActiveProfile(p) && root.activeProfile.ids.length === n ? root.activeProfile.ids : []
+    var onBar = root.displayIds
+    for (var i = 0; i < n; i++) {
+      var id = rec.length ? rec[i] : -1
+      var ok = id > 0 && onBar.indexOf(id) !== -1 && !used[id]
+      slots.push(ok ? id : -1)
+      if (ok) used[id] = true
+    }
+    for (var j = 0; j < n; j++) {
+      if (slots[j] > 0) continue
+      var found = onBar.filter(function(k) { return !used[k] && root.cardMatchesRoom(k, rooms[j]) })
+      if (found.length > 1) {
+        dupes.push(String(rooms[j].name || rooms[j].emoji || ("Card " + (j + 1))))
+      } else if (found.length === 1) {
+        slots[j] = found[0]
+        used[found[0]] = true
+      }
+    }
+    return { slots: slots, dupes: dupes }
+  }
+
+  function profileSlots(p) {
+    return root.profileMatch(p).slots
+  }
+
+  function reusedIds(p) {
+    return root.profileSlots(p).filter(function(n) { return n > 0 })
+  }
+
+  // Apps of a room not already open on workspace `id` (matched by class, one
+  // window per app).
+  function missingApps(room, id) {
+    var have = root.toplevelsOf(id).map(root.windowKeys)
+    var out = []
+    var raw = room.apps || []
+    for (var i = 0; i < (raw.length || 0); i++) {
+      var want = root.savedAppKeys(raw[i])
+      var k = -1
+      for (var w = 0; w < have.length && k === -1; w++) {
+        for (var x = 0; x < want.length; x++) {
+          if (have[w].indexOf(want[x]) !== -1) { k = w; break }
+        }
+      }
+      if (k !== -1) have.splice(k, 1)
+      else out.push(raw[i])
+    }
+    return out
+  }
+
+  // Names an app goes by, lower-cased: "org.gnome.Nautilus" also as
+  // "nautilus", so an app that reports its window a little differently from
+  // when it was saved (some flatpaks, wrappers) still counts as open.
+  function appNames(name) {
+    var n = String(name || "").toLowerCase().replace(/\.desktop$/, "")
+    if (n === "") return []
+    var out = [n]
+    var last = n.split(/[.\/]/).pop()
+    if (last && last !== n) out.push(last)
+    return out
+  }
+
+  function windowKeys(t) {
+    var ipc = t.lastIpcObject || {}
+    var keys = []
+    var names = [t.wayland ? t.wayland.appId : "", ipc["class"], ipc.initialClass]
+    for (var i = 0; i < names.length; i++) keys = keys.concat(root.appNames(names[i]))
+    return keys
+  }
+
+  function savedAppKeys(app) {
+    var keys = root.appNames(app["class"])
+    var argv = Array.isArray(app.argv) ? app.argv : []
+    if (argv.length >= 3 && String(argv[0]).split("/").pop() === "flatpak") keys = keys.concat(root.appNames(argv[2]))
+    else if (argv.length > 0) keys = keys.concat(root.appNames(String(argv[0]).split("/").pop()))
+    return keys
+  }
+
+  // Cards with windows that the profile doesn't own.
+  function otherBusyIds(p) {
+    var mine = root.reusedIds(p)
+    return root.busyIds().filter(function(n) { return mine.indexOf(n) === -1 })
+  }
+
+  function persistProfiles(list) {
+    root.localProfiles = list
+    if (!root.bar) return
+    root.persist(root.barSet("profiles", JSON.stringify(list)))
+  }
+
+  // Cards with windows or a label start picked; empty plain cards don't.
+  function resetProfilePick() {
+    var pick = {}
+    var ids = root.displayIds
+    for (var i = 0; i < ids.length; i++) {
+      var l = root.labelFor(ids[i])
+      pick[ids[i]] = root.toplevelsOf(ids[i]).length > 0 || Object.keys(l).length > 0
+    }
+    root.profilePick = pick
+  }
+
+  function toggleProfilePick(id) {
+    var pick = JSON.parse(JSON.stringify(root.profilePick))
+    pick[id] = !pick[id]
+    root.profilePick = pick
+  }
+
+  readonly property var pickedIds: root.displayIds.filter(function(id) { return root.profilePick[id] === true })
+
+  // What a card would be saved as, without its apps.
+  function cardAsRoom(id) {
+    var room = {}
+    var name = root.customName(id)
+    if (name !== "") room.name = name
+    if (root.customIcon(id) !== "") {
+      room.icon = root.customIcon(id)
+      if (root.customIconTint(id)) room.iconTint = true
+    } else if (root.customEmoji(id) !== "") {
+      room.emoji = root.customEmoji(id)
+    }
+    if (root.customColor(id) !== "") room.color = root.customColor(id)
+    return room
+  }
+
+  function saveProfile(name) {
+    var ids = root.pickedIds
+    if (ids.length === 0 || profileCapture.running) {
+      root.profileNotice = ids.length === 0 ? "Pick at least one card." : ""
+      return
+    }
+    name = String(name || "").trim().slice(0, 40) || ("Profile " + (root.profiles.length + 1))
+    root.pendingProfile = { name: name, ids: ids, rooms: ids.map(root.cardAsRoom) }
+    profileCapture.command = [root.roomScript, "capture-deck"].concat(ids.map(String))
+    profileCapture.running = true
+    root.profileNotice = "Saving…"
+  }
+
+  // Rooms go to ws-room on stdin, not as arguments, so their folders and
+  // commands never show up in `ps`. While it runs (until the apps are up or
+  // it gives up), profiles can't be opened again.
+  function launchRooms(deck) {
+    if (profileLauncher.running) {
+      // A room opened while a profile is still starting: run it on its own.
+      var extra = launcherComponent.createObject(root, { payload: JSON.stringify(deck) })
+      if (extra) extra.running = true
+      return
+    }
+    profileLauncher.payload = JSON.stringify(deck)
+    profileLauncher.running = true
+  }
+
+  component RoomLauncher: Process {
+    property string payload: ""
+    command: [root.roomScript, "launch-deck", "-"]
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
+  }
+
+  RoomLauncher {
+    id: profileLauncher
+    onExited: function(code) {
+      if (code !== 0) root.logLine("room launch exited " + code)
+    }
+  }
+
+  Component {
+    id: launcherComponent
+    RoomLauncher {
+      onExited: destroy()
+    }
+  }
+
+  Process {
+    id: profileCapture
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.finishProfileSave(String(text))
+    }
+  }
+
+  function finishProfileSave(text) {
+    var p = root.pendingProfile
+    root.pendingProfile = null
+    if (p === null) return
+    var deck = {}
+    try {
+      deck = JSON.parse(text)
+    } catch (e) {
+      deck = {}
+    }
+    var apps = 0
+    for (var i = 0; i < p.ids.length; i++) {
+      var got = deck && Array.isArray(deck[String(p.ids[i])]) ? deck[String(p.ids[i])] : []
+      p.rooms[i].apps = got.slice(0, 30)
+      apps += p.rooms[i].apps.length
+    }
+    var list = root.profiles.filter(function(q) {
+      return String(q.name).toLowerCase() !== p.name.toLowerCase()
+    })
+    var replaced = list.length !== root.profiles.length
+    if (list.length >= root.maxProfiles) {
+      root.profileNotice = "Profile limit reached (" + root.maxProfiles + "). Delete one first."
+      return
+    }
+    list.push({ name: p.name, rooms: p.rooms })
+    root.persistProfiles(list)
+    // The bar is this profile now: opening it again only tops it up.
+    root.setActiveProfile(p.name, p.ids)
+    root.profileNotice = (replaced ? "Updated " : "Saved ") + "“" + p.name + "”: " +
+      p.rooms.length + (p.rooms.length === 1 ? " card, " : " cards, ") + apps + (apps === 1 ? " app." : " apps.")
+    profileNameField.text = ""
+  }
+
+  // Workspaces 1-10 that have windows right now.
+  function busyIds() {
+    var out = []
+    for (var n = 1; n <= 10; n++) {
+      if (root.toplevelsOf(n).length > 0) out.push(n)
+    }
+    return out
+  }
+
+  // Open from the list: ask first when other cards still have apps open.
+  function requestProfile(index) {
+    var p = root.profiles[index]
+    if (!p) return
+    root.profileNotice = ""
+    if (root.profileOnBar(p)) {
+      root.profileNotice = "\u201c" + p.name + "\u201d is already open."
+      return
+    }
+    if (profileLauncher.running) {
+      root.profileNotice = "Still opening the last profile\u2026 wait until its apps are up."
+      return
+    }
+    var dupes = root.profileMatch(p).dupes
+    if (dupes.length > 0) {
+      root.profileNotice = "\u26a0 " + dupes.map(function(d) { return "\u201c" + d + "\u201d" }).join(", ") +
+        (dupes.length === 1 ? " is" : " are") + " on the bar twice. Delete the copy you don't want, then open the profile."
+      return
+    }
+    if (root.otherBusyIds(p).length > 0) root.profileConfirm = index
+    else root.openProfile(index, "close")
+  }
+
+  // Replace the bar with the profile's cards. `others` says what happens to
+  // cards that still have windows: "close" closes their apps (each card goes
+  // once its last window is gone, as with Delete), "keep" leaves them after
+  // the profile's cards. Empty cards not in the profile are removed.
+  function openProfile(index, others) {
+    root.profileConfirm = -1
+    var p = root.profiles[index]
+    if (!p || profileLauncher.running || root.profileOnBar(p) || root.profileMatch(p).dupes.length > 0) return
+    var rooms = []
+    for (var r = 0; r < (p.rooms.length || 0); r++) rooms.push(p.rooms[r])
+    // Cards already on the bar are reused (only their missing apps start);
+    // the rest get free workspaces.
+    var slots = root.profileSlots(p)
+    var busy = root.otherBusyIds(p)
+    var free = []
+    for (var n = 1; n <= 10; n++) {
+      if (busy.indexOf(n) === -1 && slots.indexOf(n) === -1) free.push(n)
+    }
+    var need = slots.filter(function(x) { return x < 0 }).length
+    if (free.length < need) {
+      root.profileNotice = "Needs " + need + " free workspaces, only " + free.length +
+        " have no windows. Close some apps first."
+      return
+    }
+    var ids = slots.map(function(x) { return x > 0 ? x : free.shift() })
+
+    var labels = {}
+    var order = ids.slice()
+    if (others === "keep") {
+      var kept = root.displayIds.filter(function(id) { return busy.indexOf(id) !== -1 })
+      for (var b = 0; b < busy.length; b++) {
+        if (kept.indexOf(busy[b]) === -1) kept.push(busy[b])
+      }
+      for (var k = 0; k < kept.length; k++) {
+        order.push(kept[k])
+        if (root.labels[String(kept[k])]) labels[String(kept[k])] = root.labels[String(kept[k])]
+      }
+    }
+    for (var i = 0; i < ids.length; i++) {
+      var room = rooms[i]
+      var entry = {}
+      if (room.name) entry.name = String(room.name)
+      if (root.validIcon(room.icon) !== "") {
+        entry.icon = root.validIcon(room.icon)
+        if (room.iconTint === true) entry.iconTint = true
+      } else if (room.emoji) {
+        entry.emoji = String(room.emoji)
+      }
+      if (/^#[0-9a-fA-F]{6}$/.test(String(room.color || ""))) entry.color = String(room.color)
+      if (Object.keys(entry).length > 0) labels[String(ids[i])] = entry
+    }
+    var hidden = []
+    for (var h = 1; h <= 10; h++) {
+      if (order.indexOf(h) === -1) hidden.push(h)
+    }
+
+    if (others !== "keep" && busy.length > 0) {
+      var pending = JSON.parse(JSON.stringify(root.pendingDeletes))
+      for (var c = 0; c < busy.length; c++) {
+        var wins = root.toplevelsOf(busy[c])
+        for (var w = 0; w < wins.length; w++) {
+          root.dispatch("hl.dsp.window.close({ window = " + root.luaQuote("address:" + root.hexAddress(wins[w])) + " })")
+        }
+        pending[String(busy[c])] = Date.now()
+      }
+      root.pendingDeletes = pending
+    }
+
+    root.localLabels = labels
+    root.localHidden = hidden
+    root.localOrder = order
+    root.persistAll(order, hidden, labels)
+    root.settingsOpen = false
+    root.setActiveProfile(p.name, ids)
+    var deck = []
+    for (var d = 0; d < ids.length; d++) {
+      deck.push({ ws: ids[d], apps: slots[d] > 0 ? root.missingApps(rooms[d], ids[d]) : (rooms[d].apps || []) })
+    }
+    // Open stays locked until ws-room has placed the apps (or given up), so
+    // a second click can't start them again.
+    if (deck.length > 0) root.launchRooms(deck)
+  }
+
+  function deleteProfile(index) {
+    var list = root.profiles.slice()
+    var gone = list.splice(index, 1)
+    root.persistProfiles(list)
+    if (gone.length && root.isActiveProfile(gone[0])) root.setActiveProfile("", [])
+    root.profileConfirm = -1
+    root.profileNotice = gone.length ? "Deleted “" + gone[0].name + "”." : ""
+  }
+
+  // "💻 Code · 🎵 Music · 3" and the app count.
+  function profileSummary(p) {
+    var rooms = []
+    var raw = p && p.rooms ? p.rooms : []
+    for (var i = 0; i < (raw.length || 0); i++) rooms.push(raw[i])
+    var apps = 0
+    var parts = rooms.map(function(r, i) {
+      var a = r.apps ? (r.apps.length || 0) : 0
+      apps += a
+      var name = String(r.name || "") || ("Card " + (i + 1))
+      return (r.emoji && !r.icon ? r.emoji + " " : "") + name
+    })
+    return parts.join(" · ") + "  —  " + apps + (apps === 1 ? " app" : " apps")
+  }
+
+  // Panel tabs (right-click +): settings | rooms | profiles | guide | about
   property string panelTab: "settings"
+  onPanelTabChanged: if (root.panelTab === "profiles") root.resetProfilePick()
 
   property string draftColor: ""
   property string draftEmoji: ""
@@ -3010,14 +3570,16 @@ BarWidget {
       width: parent.width
       spacing: Style.space(10)
 
-      Row {
+      Flow {
         id: panelTabs
+        width: parent.width
         spacing: Style.space(6)
 
         Repeater {
           model: [
             { key: "settings", name: "Settings" },
             { key: "rooms", name: "Rooms" },
+            { key: "profiles", name: "Profiles" },
             { key: "guide", name: "How to use" },
             { key: "about", name: "About" }
           ]
@@ -3040,6 +3602,7 @@ BarWidget {
           - panelTabs.implicitHeight - panelColumn.spacing))
         contentWidth: width
         contentHeight: root.panelTab === "rooms" ? roomsColumn.implicitHeight
+          : root.panelTab === "profiles" ? profilesColumn.implicitHeight
           : root.panelTab === "guide" ? guideColumn.implicitHeight
           : root.panelTab === "about" ? aboutColumn.implicitHeight
           : settingsColumn.implicitHeight
@@ -3510,6 +4073,192 @@ BarWidget {
     }
 
     Column {
+      id: profilesColumn
+      visible: root.panelTab === "profiles"
+      width: parent.width
+      spacing: Style.space(8)
+
+      BodyText {
+        text: "A profile is a whole deck of cards with their names, emoji, colours and apps. " +
+          "Opening one replaces the bar with exactly those cards, in the same order."
+      }
+
+      BodyText {
+        visible: root.profileNotice !== ""
+        text: root.profileNotice
+        color: Color.accent
+      }
+
+      SectionTitle { text: "Save the bar as a profile" }
+
+      BodyText {
+        text: "Pick the cards to include:"
+        color: Util.alpha(Color.foreground, 0.7)
+      }
+
+      Flow {
+        width: parent.width
+        spacing: Style.space(6)
+
+        Repeater {
+          model: root.displayIds
+
+          Chip {
+            required property var modelData
+            label: (root.customEmoji(modelData) ? root.customEmoji(modelData) + " " : "") +
+              (root.customName(modelData) || root.numberLabel(modelData)) +
+              (root.toplevelsOf(modelData).length > 0 ? "  · " + root.toplevelsOf(modelData).length : "")
+            selected: root.profilePick[modelData] === true
+            onPicked: root.toggleProfilePick(modelData)
+          }
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(6)
+
+        TextField {
+          id: profileNameField
+          width: parent.width - saveProfileBtn.width - parent.spacing
+          placeholderText: "Profile name (same name updates it)"
+          maximumLength: 40
+          onAccepted: root.saveProfile(text)
+          Keys.onEscapePressed: root.settingsOpen = false
+        }
+
+        Button {
+          id: saveProfileBtn
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Save " + root.pickedIds.length
+          enabled: root.pickedIds.length > 0 && !profileCapture.running
+          onClicked: root.saveProfile(profileNameField.text)
+        }
+      }
+
+      SectionTitle { topPadding: Style.space(4); text: "Your profiles" }
+
+      BodyText {
+        visible: root.profiles.length === 0
+        text: "No profiles yet."
+        color: Util.alpha(Color.foreground, 0.6)
+      }
+
+      Repeater {
+        model: root.profiles
+
+        Rectangle {
+          id: profileRow
+          required property var modelData
+          required property int index
+          readonly property bool asking: root.profileConfirm === index
+          width: profilesColumn.width
+          height: profileBody.implicitHeight + Style.space(14)
+          radius: Style.space(4)
+          color: asking ? Util.alpha(Color.accent, 0.08) : "transparent"
+          border.width: 1
+          border.color: asking ? Color.accent : Util.alpha(Color.foreground, 0.2)
+
+          Column {
+            id: profileBody
+            anchors.verticalCenter: parent.verticalCenter
+            x: Style.space(8)
+            width: parent.width - Style.space(16)
+            spacing: Style.space(6)
+
+            Item {
+              width: parent.width
+              height: Math.max(profileInfo.implicitHeight, profileButtons.height)
+
+              Column {
+                id: profileInfo
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - profileButtons.width - Style.space(6)
+                spacing: Style.space(2)
+
+                Text {
+                  width: parent.width
+                  elide: Text.ElideRight
+                  text: profileRow.modelData.name +
+                    (root.profileOnBar(profileRow.modelData) ? "   \u25cf Active" : "")
+                  color: root.profileOnBar(profileRow.modelData) ? Color.accent : Color.foreground
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                  renderType: Text.NativeRendering
+                }
+
+                Text {
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  maximumLineCount: 2
+                  elide: Text.ElideRight
+                  text: root.profileSummary(profileRow.modelData)
+                  color: Util.alpha(Color.foreground, 0.6)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                  renderType: Text.NativeRendering
+                }
+              }
+
+              Row {
+                id: profileButtons
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.right: parent.right
+                spacing: Style.space(4)
+
+                Button {
+                  text: profileLauncher.running ? "Opening\u2026"
+                    : root.profileOnBar(profileRow.modelData) ? "On"
+                    : root.profilePartial(profileRow.modelData) ? "Restore" : "Open"
+                  enabled: !profileLauncher.running && !root.profileOnBar(profileRow.modelData)
+                  tooltipText: root.profileOnBar(profileRow.modelData) ? "Already open on the bar"
+                    : root.profilePartial(profileRow.modelData) ? "Brings back only the cards you deleted" : ""
+                  onClicked: root.requestProfile(profileRow.index)
+                }
+
+                Button {
+                  text: "\u2715"
+                  foreground: Color.urgent
+                  onClicked: root.deleteProfile(profileRow.index)
+                }
+              }
+            }
+
+            BodyText {
+              visible: profileRow.asking
+              text: "Cards outside this profile still have apps open. Close those apps, or keep those cards after the profile's?"
+            }
+
+            Flow {
+              visible: profileRow.asking
+              width: parent.width
+              spacing: Style.space(6)
+
+              Button {
+                text: "Close apps"
+                enabled: !profileLauncher.running
+                foreground: Color.urgent
+                onClicked: root.openProfile(profileRow.index, "close")
+              }
+
+              Button {
+                text: "Keep them"
+                enabled: !profileLauncher.running
+                onClicked: root.openProfile(profileRow.index, "keep")
+              }
+
+              Button {
+                text: "Cancel"
+                onClicked: root.profileConfirm = -1
+              }
+            }
+          }
+        }
+      }
+    }
+
+    Column {
       id: guideColumn
       visible: root.panelTab === "guide"
       width: parent.width
@@ -3544,6 +4293,15 @@ BarWidget {
         text: "\u2022 Open a room from the Rooms tab to get its card and apps back.\n" +
           "\u2022 Saving again under the same name updates the room.\n" +
           "\u2022 Rooms reopen apps in the same folders, not their contents: Files windows and terminals come back in the folder they were in (a terminal as a fresh shell), browsers open a new window."
+      }
+
+      SectionTitle { topPadding: Style.space(4); text: "Profiles" }
+      BodyText {
+        text: "\u2022 Profiles tab \u2192 pick the cards to keep \u2192 name it \u2192 Save. Cards with apps or a label start picked.\n" +
+          "\u2022 Open a profile to get exactly those cards back, in order, with their apps. Other empty cards go away; if other cards have apps open you choose: close those apps, or keep those cards at the end.\n" +
+          "\u2022 One profile is on at a time (marked Active). While all its cards are on the bar its button says On and is locked, so it can't open twice. Delete one of its cards and the button says Restore: it brings back just that card. Opening another profile replaces it.\n" +
+          "\u2022 While a profile's apps are starting the button says Opening\u2026 and can't be clicked. If two identical cards are on the bar, the profile won't open until you delete one copy.\n" +
+          "\u2022 Saving again under the same name updates the profile. Profiles are never cleared by the fresh start after reboot."
       }
 
       SectionTitle { topPadding: Style.space(4); text: "Settings" }
@@ -3645,13 +4403,17 @@ BarWidget {
       Repeater {
         model: [
           { q: "Why did my names and colours disappear?",
-            a: "\u201cFresh start after reboot\u201d is on. Turn it off under Settings \u2192 Startup. Saved rooms are never reset." },
+            a: "\u201cFresh start after reboot\u201d is on. Turn it off under Settings \u2192 Startup. Saved rooms and profiles are never reset." },
           { q: "Super+1 doesn't go to workspace 1.",
             a: "The number keys follow the bar order. Turn off \u201cKeys follow the bar\u201d under Settings \u2192 Navigation for plain workspace numbers." },
           { q: "Does deleting a card close my apps?",
             a: "Only if you choose \u201cClose apps & delete\u201d. Otherwise the windows move to the card you pick." },
           { q: "A room didn't bring back my tabs or files.",
             a: "Rooms reopen the apps, not what was inside them. Browsers restore their own tabs if set to." },
+          { q: "Why can't I click Open on my profile?",
+            a: "It says On: the profile is already open, so it's locked to avoid a second copy. It says Opening\u2026: its apps are still starting." },
+          { q: "I closed an app inside a profile card. How do I get it back?",
+            a: "Start it again yourself: while all the profile's cards are on the bar the profile stays On. Delete the card instead and Restore brings it back with its apps." },
           { q: "Where are my settings kept?",
             a: "In ~/.config/omarchy/shell.json, under the swordfish.workspaces entry, with backups in ~/.config/omarchy/hud-workspaces/backups (Settings \u2192 Backup)." },
           { q: "After an update, Super+number or swipe went back to normal.",
@@ -4213,6 +4975,8 @@ BarWidget {
           root.previewCloseNow()
           root.panelTab = "settings"
           root.roomNotice = ""
+          root.profileNotice = ""
+          root.profileConfirm = -1
           root.settingsOpen = true
           return
         }

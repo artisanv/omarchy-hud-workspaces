@@ -44,8 +44,8 @@ mode=${1:-next}
 # shared log instead of vanishing.
 log_file=${XDG_STATE_HOME:-$HOME/.local/state}/hud-workspaces/log
 log() {
-  mkdir -p -- "${log_file%/*}" 2>/dev/null
-  printf '%s ws-step %s\n' "$(date '+%F %T')" "$*" >>"$log_file" 2>/dev/null
+  ( umask 077; mkdir -p -- "${log_file%/*}" && chmod 700 -- "${log_file%/*}"
+    printf '%s ws-step %s\n' "$(date '+%F %T')" "$*" >>"$log_file"; chmod 600 -- "$log_file" ) 2>/dev/null
 }
 # hyprctl that logs a refused call (non-zero exit or an "error" reply).
 hc() {

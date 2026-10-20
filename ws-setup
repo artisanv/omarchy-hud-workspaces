@@ -46,8 +46,8 @@ here=$(dirname "$(readlink -f "$0")")
 
 log_file=${XDG_STATE_HOME:-$HOME/.local/state}/hud-workspaces/log
 log() {
-  mkdir -p -- "${log_file%/*}" 2>/dev/null
-  printf '%s ws-setup %s\n' "$(date '+%F %T')" "$*" >>"$log_file" 2>/dev/null
+  ( umask 077; mkdir -p -- "${log_file%/*}" && chmod 700 -- "${log_file%/*}"
+    printf '%s ws-setup %s\n' "$(date '+%F %T')" "$*" >>"$log_file"; chmod 600 -- "$log_file" ) 2>/dev/null
 }
 
 quiet=0

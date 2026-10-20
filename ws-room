@@ -8,6 +8,11 @@
 #       switch to the workspace and start each app there; windows that open
 #       elsewhere (apps that hand off to an already running copy, like
 #       Firefox) are moved onto it as they appear
+#   ws-room capture-deck <workspace>...
+#       the same for several workspaces at once: {"<workspace>": [apps]}
+#   ws-room launch-deck <rooms-json>
+#       open several rooms at once (a profile): [{ws, apps}], up to 10;
+#       switches to the first one
 #   ws-room check <apps-json>
 #       print the command each app would be started with, one per line,
 #       or "skip" (nothing is started)
@@ -30,8 +35,44 @@ ws=$2
 
 log_file=${XDG_STATE_HOME:-$HOME/.local/state}/hud-workspaces/log
 log() {
-  mkdir -p -- "${log_file%/*}" 2>/dev/null
-  printf '%s ws-room %s\n' "$(date '+%F %T')" "$*" >>"$log_file" 2>/dev/null
+  ( umask 077; mkdir -p -- "${log_file%/*}" && chmod 700 -- "${log_file%/*}"
+    printf '%s ws-room %s\n' "$(date '+%F %T')" "$*" >>"$log_file"; chmod 600 -- "$log_file" ) 2>/dev/null
+}
+
+# Room data (folders, titles, commands) never goes on a command line, where
+# other local users could read it in `ps`: it is read from stdin, turned
+# into JSON with builtins + jq reading stdin, and sent to Hyprland over its
+# socket rather than as `hyprctl` arguments.
+
+# A string as a JSON string literal.
+jstr() { printf '%s' "$1" | jq -Rs .; }
+
+# Send one request to Hyprland's socket (the request on stdin, like
+# `hyprctl` would send it: "/eval <lua>", "/dispatch <lua>").
+hypr_send() {
+  python3 -I -c '
+import os, socket, sys
+path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", ""), "hypr",
+                    os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""), ".socket.sock")
+s = socket.socket(socket.AF_UNIX)
+s.connect(path)
+s.sendall(sys.stdin.buffer.read())
+s.shutdown(socket.SHUT_WR)
+out = b""
+while True:
+    b = s.recv(65536)
+    if not b:
+        break
+    out += b
+sys.exit(0 if out.strip() == b"ok" else 1)'
+}
+
+# The JSON argument of launch/launch-deck/check: "-" (or nothing) reads one
+# line from stdin, which is what the widget does.
+json_arg() {
+  local v=${1:--}
+  if [[ $v == - ]]; then IFS= read -r v || [[ -n $v ]] || v='[]'; fi
+  printf '%s' "$v"
 }
 
 # Limits, so a huge or crafted room can't bog the bar down.
@@ -61,7 +102,7 @@ argv_of() {
     sed -E 's/^app-flatpak-(.*)-[0-9]+\.scope$/\1/')
   if [[ -n $flatpak ]]; then
     [[ $flatpak =~ $flatpak_id ]] || { log "skipped flatpak with an odd id: $flatpak"; return; }
-    jq -cn --arg id "$flatpak" '["flatpak", "run", $id]'
+    printf '["flatpak","run",%s]\n' "$(jstr "$flatpak")"
     return
   fi
   case $class in
@@ -138,7 +179,7 @@ capture() {
     if [[ $class == org.gnome.Nautilus ]]; then
       cwd=${nfolder[$addr]:-}
       if [[ -n $cwd ]]; then
-        argv=$(jq -cn --arg d "$cwd" '["nautilus", "--new-window", $d]')
+        argv="[\"nautilus\",\"--new-window\",$(jstr "$cwd")]"
       else
         cwd=$(cwd_of "$pid")
       fi
@@ -170,19 +211,18 @@ capture() {
           done
         done <<<"$kids"
       fi
-      [[ -n $cwd ]] && argv=$(jq -cn --arg d "$cwd" '["gnome-terminal", "--working-directory=" + $d]')
+      [[ -n $cwd ]] && argv="[\"gnome-terminal\",$(jstr "--working-directory=$cwd")]"
     else
       cwd=$(cwd_of "$pid")
     fi
-    rows+=("$(jq -cn --arg class "$class" --arg title "$title" --argjson argv "$argv" --arg cwd "$cwd" \
-      '{class: $class, title: $title[:200], argv: $argv, cwd: $cwd}')")
+    rows+=("{\"class\":$(jstr "$class"),\"title\":$(jstr "${title:0:200}"),\"argv\":$argv,\"cwd\":$(jstr "$cwd")}")
   done <<<"$wins"
   if (( ${#rows[@]} )); then printf '%s\n' "${rows[@]}" | jq -cs .; else echo '[]'; fi
 }
 
 # Lua string literal: backslash, quote and line breaks escaped, other
 # control characters dropped. The one escaper for everything sent to
-# `hyprctl eval` from here.
+# Hyprland (eval over its socket) from here.
 lua_str() {
   local s=${1//\\/\\\\}
   s=${s//\"/\\\"}
@@ -226,60 +266,103 @@ except ValueError:
   jq -j '.[] | ., "\u0000"' <<<"$argv"
 }
 
-launch() {
-  local n i cwd class full arg argv
-  apps=${3:-[]}
-  n=$(jq 'if type == "array" then length else error end' <<<"$apps" 2>/dev/null) ||
-    { log "launch $ws: room is not a list"; exit 1; }
-  (( n > max_apps )) && { log "launch $ws: $n apps, only the first $max_apps started"; n=$max_apps; }
+# Start the apps of one or more rooms, each on its own workspace:
+# $1 = [{ws, apps}]. Switches to the first room's workspace.
+launch_rooms() {
+  local rooms=$1 nrooms r n i cwd class full arg argv
+  nrooms=$(jq 'if type == "array" then length else error end' <<<"$rooms" 2>/dev/null) ||
+    { log "launch: rooms are not a list"; exit 1; }
+  (( nrooms > 10 )) && { log "launch: $nrooms rooms, only the first 10 started"; nrooms=10; }
+  (( nrooms )) || exit 0
+  ws=$(jq -r '.[0].ws' <<<"$rooms")
+  [[ $ws =~ ^[0-9]+$ ]] || { log "launch: bad workspace '$ws'"; exit 1; }
   "$here/ws-step" goto "$ws"
 
   local before
   before=$(hyprctl clients -j | jq -c '[.[].address]')
-  local want=()
-  for (( i = 0; i < n; i++ )); do
-    mapfile -d '' -t argv < <(app_argv "$i")
-    (( ${#argv[@]} )) || continue
-    cwd=$(jq -r --argjson i "$i" '.[$i].cwd // "" | strings' <<<"$apps")
-    class=$(jq -r --argjson i "$i" '.[$i].class // "" | strings' <<<"$apps")
-    [[ -d $cwd ]] || cwd=$HOME
-    # Every word quoted: nothing from the room is read as shell syntax.
-    full="cd $(printf '%q' "$cwd") && exec"
-    for arg in "${argv[@]}"; do full+=" $(printf '%q' "$arg")"; done
-    # The rule places apps whose window belongs to the started process;
-    # the watcher below catches the rest.
-    hyprctl eval "hl.exec_cmd($(lua_str "$full"), { workspace = $(lua_str "$ws silent") })" >/dev/null ||
-      log "launch $ws: hyprctl refused to start ${argv[0]}"
-    want+=("$class")
+  # Workspace -> classes still expected there, in room order.
+  local wants='[]'
+  for (( r = 0; r < nrooms; r++ )); do
+    ws=$(jq -r --argjson r "$r" '.[$r].ws' <<<"$rooms")
+    [[ $ws =~ ^[0-9]+$ ]] || { log "launch: bad workspace '$ws', room skipped"; continue; }
+    apps=$(jq -c --argjson r "$r" '.[$r].apps // []' <<<"$rooms")
+    n=$(jq 'if type == "array" then length else error end' <<<"$apps" 2>/dev/null) ||
+      { log "launch $ws: room is not a list"; continue; }
+    (( n > max_apps )) && { log "launch $ws: $n apps, only the first $max_apps started"; n=$max_apps; }
+    local want=()
+    for (( i = 0; i < n; i++ )); do
+      mapfile -d '' -t argv < <(app_argv "$i")
+      (( ${#argv[@]} )) || continue
+      cwd=$(jq -r --argjson i "$i" '.[$i].cwd // "" | strings' <<<"$apps")
+      class=$(jq -r --argjson i "$i" '.[$i].class // "" | strings' <<<"$apps")
+      [[ -d $cwd ]] || cwd=$HOME
+      # Every word quoted: nothing from the room is read as shell syntax.
+      full="cd $(printf '%q' "$cwd") && exec"
+      for arg in "${argv[@]}"; do full+=" $(printf '%q' "$arg")"; done
+      # The rule places apps whose window belongs to the started process;
+      # the watcher below catches the rest.
+      printf '/eval hl.exec_cmd(%s, { workspace = %s })' "$(lua_str "$full")" "$(lua_str "$ws silent")" |
+        hypr_send || log "launch $ws: Hyprland refused to start ${argv[0]##*/}"
+      want+=("$class")
+    done
+    (( ${#want[@]} )) || continue
+    wants=$( { printf '%s\n' "$wants"; printf '%s\n' "${want[@]}" | jq -R . | jq -cs --argjson ws "$ws" '{ws: $ws, left: .}'; } |
+      jq -cs '.[0] + [.[1]]')
   done
-  (( ${#want[@]} )) || exit 0
+  [[ $(jq 'map(.left | length) | add // 0' <<<"$wants") == 0 ]] && exit 0
 
-  # Move new windows of the expected apps onto the room as they appear.
-  local deadline=$(( SECONDS + 20 )) wanted
-  wanted=$(printf '%s\n' "${want[@]}" | jq -R . | jq -cs .)
+  # Windows that open elsewhere (apps that hand off to an already running
+  # copy) are moved onto a room still waiting for that app. A new window
+  # already on a room that expects its class counts for that room first, so
+  # two rooms that both have a terminal don't take each other's.
+  local deadline=$(( SECONDS + 20 + 5 * nrooms )) claimed='[]' out line left=""
   while (( SECONDS < deadline )); do
-    local moved
-    moved=$(hyprctl clients -j | jq -r --argjson before "$before" --argjson wanted "$wanted" --argjson ws "$ws" '
-      [.[] | select((.address as $a | $before | index($a) | not))] as $new
-      | reduce $new[] as $w ({left: $wanted, out: []};
-          (.left | index($w.class)) as $i
-          | if $i == null then . else
-              .left |= (.[:$i] + .[$i + 1:])
-              | if $w.workspace.id != $ws then .out += [$w.address] else . end
-            end)
-      | (.out[]), "left=\(.left | length)"')
-    local left=""
+    # State goes in on stdin with the client list, never as arguments.
+    out=$( { printf '%s\n%s\n%s\n' "$before" "$claimed" "$wants"; hyprctl clients -j; } | jq -cs '
+      .[0] as $before | .[1] as $claimed | .[2] as $wants | .[3]
+      | def take($w; $k): .wants[$k].left |= (index($w.class) as $i | .[:$i] + .[$i + 1:])
+        | .claimed += [$w.address];
+      [.[] | select(.address as $a | ($before | index($a) | not) and ($claimed | index($a) | not))] as $new
+      | reduce $new[] as $w ({wants: $wants, claimed: $claimed, moves: []};
+          (.wants | map(.ws == $w.workspace.id and (.left | index($w.class) != null)) | index(true)) as $k
+          | if $k == null then . else take($w; $k) end)
+      | reduce ($new[] | select(.address as $a | $claimed | index($a) | not)) as $w (.;
+          if (.claimed | index($w.address)) != null then . else
+            (.wants | map(.left | index($w.class) != null) | index(true)) as $k
+            | if $k == null then . else
+                take($w; $k) | .moves += [{address: $w.address, ws: .wants[$k].ws}]
+              end
+          end)')
+    claimed=$(jq -c '.claimed' <<<"$out")
+    wants=$(jq -c '.wants' <<<"$out")
     while read -r line; do
-      case $line in
-        left=*) left=${line#left=} ;;
-        0x*) [[ $line =~ ^0x[0-9a-fA-F]+$ ]] &&
-          hyprctl dispatch "hl.dsp.window.move({ workspace = \"$ws\", window = \"address:$line\", follow = false })" >/dev/null ;;
-      esac
-    done <<<"$moved"
+      local addr=${line%% *} to=${line#* }
+      [[ $addr =~ ^0x[0-9a-fA-F]+$ && $to =~ ^[0-9]+$ ]] &&
+        hyprctl dispatch "hl.dsp.window.move({ workspace = \"$to\", window = \"address:$addr\", follow = false })" >/dev/null
+    done < <(jq -r '.moves[] | "\(.address) \(.ws)"' <<<"$out")
+    left=$(jq 'map(.left | length) | add // 0' <<<"$wants")
     [[ $left == 0 ]] && break
     sleep 0.4
   done
-  [[ $left == 0 ]] || log "launch $ws: $left app window(s) never appeared"
+  [[ $left == 0 ]] || jq -r '.[] | select(.left | length > 0) | "\(.ws) \(.left | length)"' <<<"$wants" |
+    while read -r ws n; do log "launch $ws: $n app window(s) never appeared"; done
+}
+
+launch() {
+  local list
+  list=$(json_arg "${3:-}" | jq -cR --argjson ws "$ws" '[{ws: $ws, apps: (try fromjson catch null)}]')
+  launch_rooms "$list"
+}
+
+# capture-deck <ws>...: {"<ws>": [apps], ...} for several workspaces.
+capture_deck() {
+  local id acc='{}' apps
+  for id in "$@"; do
+    [[ $id =~ ^[0-9]+$ ]] || continue
+    apps=$(ws=$id; capture)
+    acc=$(printf '%s\n%s\n' "$acc" "${apps:-[]}" | jq -cs --arg k "$id" '.[0] + {($k): .[1]}')
+  done
+  echo "$acc"
 }
 
 check() {
@@ -293,8 +376,10 @@ check() {
 }
 
 case $mode in
-  check) ws=-; check "$2" ;;
+  check) ws=-; check "$(json_arg "${2:-}")" ;;
   capture) [[ $ws =~ ^[0-9]+$ ]] || { echo '[]'; exit 1; }; capture ;;
+  capture-deck) shift; capture_deck "$@" ;;
   launch) [[ $ws =~ ^[0-9]+$ ]] || { log "launch: bad workspace '$ws'"; exit 1; }; launch "$@" ;;
-  *) echo "usage: ws-room capture <ws> | launch <ws> <apps-json>" >&2; exit 2 ;;
+  launch-deck) launch_rooms "$(json_arg "${2:-}")" ;;
+  *) echo "usage: ws-room capture <ws> | capture-deck <ws>... | launch <ws> <apps-json> | launch-deck <rooms-json> | check <apps-json>" >&2; exit 2 ;;
 esac
