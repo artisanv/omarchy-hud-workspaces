@@ -50,6 +50,15 @@ jstr() { printf '%s' "$1" | jq -Rs .; }
 # Send one request to Hyprland's socket (the request on stdin, like
 # `hyprctl` would send it: "/eval <lua>", "/dispatch <lua>").
 hypr_send() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    # Without python3 the request has to go through hyprctl's arguments.
+    log "python3 not found: using hyprctl (room commands visible in ps)"
+    local req
+    req=$(cat)
+    local verb=${req%% *}
+    hyprctl "${verb#/}" "${req#* }" >/dev/null
+    return
+  fi
   python3 -I -c '
 import os, socket, sys
 path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", ""), "hypr",

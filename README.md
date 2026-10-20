@@ -20,7 +20,7 @@ A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style 
 cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
 the order you see on the bar.
 
-Version 1.16.0 · requires Omarchy 4 (Hyprland Lua config) · `jq` and `hyprctl` on `PATH`.
+Version 1.16.1 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
 
 **Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
 Hyprland versions may work; the widget warns in Settings when yours differs from the
@@ -42,7 +42,7 @@ Or from a release zip / folder:
    (the folder name and the `id` in `manifest.json` must both be `swordfish.workspaces`).
 2. Check the download and make the scripts executable:
    ```bash
-   sha256sum -c swordfish-hud-workspaces-v1.16.0.zip.sha256   # next to the zip
+   sha256sum -c swordfish-hud-workspaces-v1.16.1.zip.sha256   # next to the zip
    chmod +x ~/.config/omarchy/plugins/swordfish.workspaces/ws-*
    ```
 3. Put the widget on the bar in place of the stock workspaces widget:
@@ -480,6 +480,10 @@ the MIT licence; keep it with this plugin, or remove it from your own fork.
 ---
 
 ## Changelog
+
+- **1.16.1**: `python3` is listed as a requirement (it carries room commands to Hyprland's
+  socket). Without it, rooms still open through `hyprctl`, with a note in the log that
+  their commands are then visible in `ps`.
 
 - **1.16.0**: **Privacy fixes** from the marketplace review: room data (folders, titles,
   commands) no longer appears in process arguments. Settings are written inside the shell,
