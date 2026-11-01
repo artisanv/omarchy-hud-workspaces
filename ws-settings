@@ -40,7 +40,7 @@ log() {
 # key → type the value must have once decoded ("json" = JSON text of an
 # array/object, as the widget stores it).
 known='{
-  "order": "json", "labels": "json", "hidden": "json", "rooms": "json", "profiles": "json", "activeProfile": "string",
+  "order": "json", "labels": "json", "hidden": "json", "kept": "json", "rooms": "json", "profiles": "json", "activeProfile": "string",
   "recentEmoji": "json", "recentColors": "json",
   "transition": "string", "transitionCurve": "string", "transitionDuration": "number",
   "transitionDistance": "number", "swipeNatural": "boolean", "wrapSwipe": "boolean",

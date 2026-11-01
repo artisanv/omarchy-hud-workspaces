@@ -20,7 +20,7 @@ A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style 
 cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
 the order you see on the bar.
 
-Version 1.17.0 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
+Version 1.18.0 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
 
 **Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
 Hyprland versions may work; the widget warns in Settings when yours differs from the
@@ -42,7 +42,7 @@ Or from a release zip / folder:
    (the folder name and the `id` in `manifest.json` must both be `swordfish.workspaces`).
 2. Check the download and make the scripts executable:
    ```bash
-   sha256sum -c swordfish-hud-workspaces-v1.17.0.zip.sha256   # next to the zip
+   sha256sum -c swordfish-hud-workspaces-v1.18.0.zip.sha256   # next to the zip
    chmod +x ~/.config/omarchy/plugins/swordfish.workspaces/ws-*
    ```
 3. Put the widget on the bar in place of the stock workspaces widget:
@@ -65,7 +65,7 @@ Or from a release zip / folder:
 |---|---|
 | **Click** a card | Go to that workspace. |
 | **Drag** a card | Reorder the bar. Cards step aside to show where it lands; the order is saved. |
-| **Double-click** or **right-click** a card | Open the card editor: name, emoji or your own icon, colour, save as room, delete. |
+| **Double-click** or **right-click** a card | Open the card editor: name, emoji or your own icon, colour, save as room, close, delete. |
 | **Hover** a card | Room preview: the windows on that workspace (click one to focus it). |
 | **Scroll** over the bar | Step through the cards in bar order. Wraps around by default. |
 | **3-finger swipe** | Step through the cards in bar order (after the setup below). |
@@ -97,6 +97,22 @@ Or from a release zip / folder:
   [room](#rooms).
 
 On a vertical bar, cards stay compact and show the emoji, icon or number only.
+
+### Many cards: they never cover the rest of the bar
+
+The cards only use the space up to the next thing on the bar (the clock, or whatever
+comes after this widget). When they don't fit, named cards shorten their names
+("Vibe-V…"); if that still isn't enough, every card becomes a compact chip with just its
+emoji, icon or number. Hover a card for its full name. As soon as there's room again
+(fewer cards, shorter names), they grow back.
+
+### Closing a workspace (editor → Close…)
+
+Close a workspace without deleting it: **Close…** → **Yes, close apps** closes every app
+on it the polite way (like Super+W; apps with unsaved work may ask first), and the card
+**stays on the bar** with its name, emoji, colour and place, empty. Click it later to
+work there again. Only shown when the workspace has windows. **Delete…** is still there
+to remove the card.
 
 ### Custom icons
 
@@ -336,6 +352,7 @@ be set from a terminal, e.g. `omarchy bar set swordfish.workspaces transition sl
 | `labels` | per-workspace `name` / `emoji` or `icon` + `iconTint` / `color` (JSON) | none |
 | `iconDir` | folder for [custom icons](#custom-icons) | `~/.config/omarchy/hud-icons` |
 | `hidden` | deleted workspaces, JSON list of numbers | `[]` |
+| `kept` | closed workspaces whose cards stay while empty, JSON list of numbers | `[]` |
 | `transition` | `glide` `slide` `verticalglide` `vertical` `fade` `none` | `glide` |
 | `transitionCurve` | `smooth` `snappy` `bouncy` `gentle` `easeinout` `linear` | `smooth` |
 | `transitionDuration` | 100–1500 (ms) | `400` |
@@ -490,6 +507,10 @@ the MIT licence; keep it with this plugin, or remove it from your own fork.
 
 ## Changelog
 
+- **1.18.0**: The cards never cover the rest of the bar: with many cards they shorten their
+  names, then shrink to compact chips (emoji, icon or number), so the clock and the centre
+  of the bar stay visible. New **Close…** in the card editor closes a workspace's apps but
+  keeps its card (name, emoji, colour, place) on the bar. New setting `kept`.
 - **1.17.0**: Icons and emoji no longer overlap neighbouring cards. An emoji is drawn in a
   fixed box and shrinks to fit it, so wide colour-emoji glyphs and multi-part emoji (🧑‍💻,
   flags, skin tones) stay inside their card, and card widths account for the emoji's real

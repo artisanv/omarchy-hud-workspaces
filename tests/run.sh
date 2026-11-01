@@ -47,6 +47,8 @@ eq "order as a real array"           "$(order '{"order":[5,4]}' '[]')" "5 4 1 2 
 eq "ids above 5 only while live"     "$(order '{"order":"[8,9,1]"}' '[1,8]')" "8 1 2 3 4 5"
 eq "other live ws appended in order" "$(order '{}' '[7,6,1]')" "1 2 3 4 5 6 7"
 eq "deleted hidden unless live"      "$(order '{"hidden":"[2,3]"}' '[3]')" "1 3 4 5"
+eq "closed (kept) above 5 stays"     "$(order '{"order":"[1,2,3,4,5,8]","kept":"[8]"}' '[1]')" "1 2 3 4 5 8"
+eq "closed (kept) 1-5 stays in place" "$(order '{"order":"[3,1,2,4,5]","kept":"[3]"}' '[1]')" "3 1 2 4 5"
 eq "junk in order ignored"           "$(order '{"order":"[\"x\",0,11,2.5,2,2]"}' '[]')" "2 1 3 4 5"
 eq "broken JSON order"               "$(order '{"order":"[1,"}' '[]')" "1 2 3 4 5"
 

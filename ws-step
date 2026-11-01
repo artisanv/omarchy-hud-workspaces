@@ -141,6 +141,8 @@ order=$(jq -c '.order // [] | if type == "string" then (try fromjson catch []) e
   | if type == "array" then . else [] end' <<<"$entry")
 hidden=$(jq -c '.hidden // [] | if type == "string" then (try fromjson catch []) else . end
   | if type == "array" then map(tonumber? // empty) else [] end' <<<"$entry")
+kept=$(jq -c '.kept // [] | if type == "string" then (try fromjson catch []) else . end
+  | if type == "array" then map(tonumber? // empty) else [] end' <<<"$entry")
 if [[ -n ${HUD_TEST_LIVE:-} ]]; then
   live=$HUD_TEST_LIVE cur=${HUD_TEST_CUR:-1}
 else
@@ -148,11 +150,11 @@ else
   cur=$(hyprctl activeworkspace -j | jq '.id')
 fi
 
-mapfile -t ids < <(jq -n -r --argjson order "$order" --argjson live "$live" --argjson hidden "$hidden" '
+mapfile -t ids < <(jq -n -r --argjson order "$order" --argjson live "$live" --argjson hidden "$hidden" --argjson kept "$kept" '
   def has($x): any(.[]; . == $x);
   def gone($x): ($live | has($x) | not);
   [$order[] | (tonumber? // empty) | select(. == floor and . >= 1 and . <= 10)]
-  | reduce .[] as $x ([]; if has($x) or (($x > 5 or ($hidden | has($x))) and gone($x)) then . else . + [$x] end)
+  | reduce .[] as $x ([]; if has($x) or (($x > 5 or ($hidden | has($x))) and ($kept | has($x) | not) and gone($x)) then . else . + [$x] end)
   | reduce (1, 2, 3, 4, 5) as $x (.; if has($x) or (($hidden | has($x)) and gone($x)) then . else . + [$x] end)
   | reduce ($live | sort[]) as $x (.; if has($x) then . else . + [$x] end)
   | .[]')

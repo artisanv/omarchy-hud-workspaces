@@ -42,6 +42,7 @@ BarWidget {
     }
 
     var hidden = root.hiddenSet
+    var kept = root.keptSet
     var order = root.localOrder !== null ? root.localOrder : root.setting("order", [])
     // `qs ipc call` expands JSON-array arguments into separate parameters, so
     // persistOrder stores the list as its JSON text in a string; accept both
@@ -58,7 +59,7 @@ BarWidget {
         var oid = Number(order[j])
         if (!isFinite(oid) || Math.floor(oid) !== oid || oid < 1 || oid > 10) continue
         if (seen[oid]) continue
-        if ((oid > 5 || hidden[oid]) && live.indexOf(oid) === -1) continue
+        if ((oid > 5 || hidden[oid]) && !kept[oid] && live.indexOf(oid) === -1) continue
         seen[oid] = true
         ids.push(oid)
       }
@@ -111,6 +112,29 @@ BarWidget {
     for (var i = 0; i < root.hiddenList.length; i++) set[root.hiddenList[i]] = true
     return set
   }
+  // Closed workspaces: their apps were closed but the card stays on the bar
+  // (name, emoji, colour, place) even with nothing on it, until it is
+  // deleted. Saved as JSON text under `kept`.
+  property var localKept: null
+  readonly property var savedKept: {
+    var raw = root.setting("kept", [])
+    if (typeof raw === "string") {
+      try {
+        raw = JSON.parse(raw)
+      } catch (e) {
+        raw = []
+      }
+    }
+    return Array.isArray(raw) ? raw.map(Number).filter(function(n) { return n >= 1 && n <= 10 }) : []
+  }
+  onSavedKeptChanged: root.localKept = null
+  readonly property var keptList: root.localKept !== null ? root.localKept : root.savedKept
+  readonly property var keptSet: {
+    var set = {}
+    for (var i = 0; i < root.keptList.length; i++) set[root.keptList[i]] = true
+    return set
+  }
+
   readonly property var savedOrder: root.setting("order", [])
   onSavedOrderChanged: root.localOrder = null
 
@@ -643,7 +667,7 @@ BarWidget {
   // The text part of a card next to its emoji or icon: the name once named
   // (horizontal bars), the number when there is neither, else nothing.
   function cardText(id) {
-    var name = root.vertical ? "" : root.customName(id)
+    var name = root.vertical || root.compactCards ? "" : root.customName(id)
     if (name !== "") return name
     return root.hasMark(id) ? "" : root.numberLabel(id)
   }
@@ -985,6 +1009,7 @@ BarWidget {
 
   function startDelete() {
     root.dropPendingDelete(root.editingId)
+    root.dropPendingClose(root.editingId)
     var fallback = root.neighbourOf(root.editingId)
     var targets = {}
     var wins = root.toplevelsOf(root.editingId)
@@ -1077,6 +1102,76 @@ BarWidget {
     root.pendingDeletes = pending
   }
 
+  // ---- Closing a workspace (the card stays) ----
+  // Closes every app on it but keeps the card, its name, emoji, colour and
+  // place on the bar, empty, until it's deleted. Clicking it later opens the
+  // workspace again.
+  property var pendingCloses: ({})
+  readonly property bool closingMode: root.editMode === "confirmCloseKeep"
+    || root.editMode === "closingKeep" || root.editMode === "closeKeepFailed"
+
+  function keepCard(id) {
+    if (root.keptSet[id]) return
+    var kept = root.keptList.concat([id])
+    var hidden = root.hiddenList.filter(function(n) { return n !== id })
+    var order = root.displayIds.slice()
+    if (order.indexOf(id) === -1) order.push(id)
+    root.localKept = kept
+    root.localHidden = hidden
+    root.localOrder = order
+    root.persist([root.barSet("kept", JSON.stringify(kept)), root.barSet("hidden", JSON.stringify(hidden)),
+      root.barSet("order", JSON.stringify(order))])
+  }
+
+  function closeAndKeep() {
+    var id = root.editingId
+    if (id < 0) return
+    root.dropPendingDelete(id)
+    root.keepCard(id)
+    var wins = root.toplevelsOf(id)
+    if (wins.length === 0) {
+      root.cancelRename()
+      return
+    }
+    for (var i = 0; i < wins.length; i++) {
+      root.dispatch("hl.dsp.window.close({ window = " + root.luaQuote("address:" + root.hexAddress(wins[i])) + " })")
+    }
+    var pending = JSON.parse(JSON.stringify(root.pendingCloses))
+    pending[String(id)] = Date.now()
+    root.pendingCloses = pending
+    root.editMode = "closingKeep"
+  }
+
+  function dropPendingClose(id) {
+    if (root.pendingCloses[String(id)] === undefined) return
+    var pending = JSON.parse(JSON.stringify(root.pendingCloses))
+    delete pending[String(id)]
+    root.pendingCloses = pending
+  }
+
+  Timer {
+    interval: 300
+    repeat: true
+    running: Object.keys(root.pendingCloses).length > 0
+    onTriggered: {
+      var now = Date.now()
+      var keys = Object.keys(root.pendingCloses)
+      for (var i = 0; i < keys.length; i++) {
+        var id = Number(keys[i])
+        var started = root.pendingCloses[keys[i]]
+        var editing = root.editingId === id
+        if (root.toplevelsOf(id).length === 0) {
+          root.dropPendingClose(id)
+          if (editing && root.closingMode) root.cancelRename()
+        } else if (now - started > root.pendingDeleteMs) {
+          root.dropPendingClose(id)
+        } else if (editing && root.editMode === "closingKeep" && now - started > 6000) {
+          root.editMode = "closeKeepFailed"
+        }
+      }
+    }
+  }
+
   Timer {
     id: closeWatch
     interval: 300
@@ -1104,6 +1199,7 @@ BarWidget {
   // so Hyprland can destroy the now-empty workspace.
   function finishDelete(id, landing) {
     root.dropPendingDelete(id)
+    root.dropPendingClose(id)
     var focused = Hyprland.focusedWorkspace !== null && Hyprland.focusedWorkspace.id === id
     var goTo = landing > 0 ? landing : root.neighbourOf(id)
 
@@ -1161,9 +1257,11 @@ BarWidget {
       root.localOrder = []
       root.localLabels = ({})
       root.localHidden = []
+      root.localKept = []
       cmds.push(root.barSet("order", "[]"))
       cmds.push(root.barSet("labels", "{}"))
       cmds.push(root.barSet("hidden", "[]"))
+      cmds.push(root.barSet("kept", "[]"))
     }
     root.localActive = { name: "", ids: [] }
     cmds.push(root.barSet("activeProfile", ""))
@@ -1184,6 +1282,14 @@ BarWidget {
     if (order !== null) cmds.push(root.barSet("order", JSON.stringify(order)))
     if (hidden !== null) cmds.push(root.barSet("hidden", JSON.stringify(hidden)))
     if (labels !== null) cmds.push(root.barSet("labels", JSON.stringify(labels)))
+    // A deleted (hidden) card is no longer a closed one.
+    if (hidden !== null) {
+      var kept = root.keptList.filter(function(n) { return hidden.indexOf(n) === -1 })
+      if (kept.length !== root.keptList.length) {
+        root.localKept = kept
+        cmds.push(root.barSet("kept", JSON.stringify(kept)))
+      }
+    }
     root.persist(cmds)
   }
 
@@ -2759,22 +2865,141 @@ BarWidget {
     font.bold: true
   }
 
-  readonly property var cardSizes: {
-    var sizes = {}
-    var ids = root.displayIds
-    for (var i = 0; i < ids.length; i++) {
-      var id = ids[i]
-      if (root.vertical || root.customName(id) === "") {
-        sizes[id] = root.vertical ? root.chipH : root.chipW
-      } else {
-        var w = labelMetrics.advanceWidth(root.customName(id)) + 2 * root.cardPad
-        if (root.customIcon(id) !== "") w += root.emojiSize + root.emojiGap
-        else if (root.customEmoji(id) !== "") w += root.emojiBoxW + root.emojiGap
-        sizes[id] = Math.ceil(Math.max(root.chipW, Math.min(root.maxCardW, w)))
-      }
-    }
-    return sizes
+  // ---- Fitting the bar ----
+  // The cards never run into the next thing on the bar (the clock, the
+  // centre or right modules). `fitRoom` is the space from the start of this
+  // widget to the first module after it that isn't in its own section,
+  // minus the widths of the modules that follow it in its own section. It is
+  // measured from the bar itself every couple of seconds (the clock changes
+  // width) and whenever the cards change. When the cards don't fit, named
+  // cards shorten their names (elided, full name in the tooltip); if that
+  // still isn't enough, every card becomes a compact chip showing just its
+  // emoji, icon or number.
+  property real fitRoom: Infinity
+
+  function isModuleSlot(item) {
+    return item && item.entry !== undefined && item.region !== undefined && item.moduleName !== undefined
   }
+
+  function collectSlots(item, out) {
+    var kids = item.children
+    for (var i = 0; i < kids.length; i++) {
+      var kid = kids[i]
+      if (!kid) continue
+      if (root.isModuleSlot(kid)) out.push(kid)
+      else root.collectSlots(kid, out)
+    }
+  }
+
+  function measureRoom() {
+    var room = Infinity
+    try {
+      if (!root.vertical && root.bar && root.visible) {
+        var mySlot = root.parent
+        while (mySlot && !root.isModuleSlot(mySlot)) mySlot = mySlot.parent
+        var top = root
+        while (top.parent) top = top.parent
+        var start = root.mapToItem(null, 0, 0).x
+        var region = mySlot ? String(mySlot.region) : "left"
+        var slotStart = mySlot ? mySlot.mapToItem(null, 0, 0).x : start
+        var limit = Infinity
+        var following = 0
+        var slots = []
+        root.collectSlots(top, slots)
+        for (var i = 0; i < slots.length; i++) {
+          var s = slots[i]
+          if (s === mySlot || !s.visible || s.width <= 0) continue
+          var sx = s.mapToItem(null, 0, 0).x
+          if (sx <= slotStart) continue
+          if (String(s.region) === region) following += s.width
+          else limit = Math.min(limit, sx)
+        }
+        if (limit < Infinity) room = Math.max(0, limit - start - following - Style.space(12))
+      }
+    } catch (e) {
+      room = Infinity
+    }
+    if (Math.abs(room - root.fitRoom) > 0.5 || (room === Infinity) !== (root.fitRoom === Infinity))
+      root.fitRoom = room
+  }
+
+  Timer {
+    interval: 2000
+    repeat: true
+    running: !root.vertical && root.bar !== null
+    triggeredOnStart: true
+    onTriggered: root.measureRoom()
+  }
+  onDisplayIdsChanged: Qt.callLater(root.measureRoom)
+  onLabelsChanged: Qt.callLater(root.measureRoom)
+
+  // Room left for the cards themselves, after the "+" button.
+  readonly property real rowRoom: root.fitRoom - (root.hGap + root.chipW + root.trailingGap)
+
+  // Natural width of each card: named cards grow to fit "emoji name"
+  // (capped at maxCardW), everything else is the fixed chip.
+  function naturalSize(id) {
+    if (root.vertical) return root.chipH
+    if (root.customName(id) === "") return root.chipW
+    return Math.ceil(Math.max(root.chipW, Math.min(root.maxCardW, root.markWidth(id)
+      + labelMetrics.advanceWidth(root.customName(id)) + 2 * root.cardPad)))
+  }
+
+  function markWidth(id) {
+    if (root.customIcon(id) !== "") return root.emojiSize + root.emojiGap
+    if (root.customEmoji(id) !== "") return root.emojiBoxW + root.emojiGap
+    return 0
+  }
+
+  // Smallest a named card gets before going compact: its mark plus "Ab…".
+  function minNamedSize(id) {
+    return Math.ceil(Math.max(root.chipW, root.markWidth(id) + labelMetrics.advanceWidth("Ab…")
+      + 2 * root.cardPad))
+  }
+
+  readonly property var cardLayout: {
+    var ids = root.displayIds
+    var natural = {}
+    var total = 0
+    for (var i = 0; i < ids.length; i++) {
+      natural[ids[i]] = root.naturalSize(ids[i])
+      total += natural[ids[i]]
+    }
+    var gaps = Math.max(0, ids.length - 1) * root.rowGap
+    var room = root.rowRoom
+    if (root.vertical || room === Infinity || total + gaps <= room)
+      return { sizes: natural, compact: false }
+
+    // Cap named cards at one width, the largest that fits.
+    function sizesAt(cap) {
+      var out = {}
+      var sum = 0
+      for (var j = 0; j < ids.length; j++) {
+        var id = ids[j]
+        var w = natural[id]
+        if (root.customName(id) !== "") w = Math.max(root.minNamedSize(id), Math.min(w, Math.floor(cap)))
+        out[id] = w
+        sum += w
+      }
+      return { sizes: out, total: sum }
+    }
+    var lo = 0
+    var hi = root.maxCardW
+    if (sizesAt(lo).total + gaps <= room) {
+      for (var step = 0; step < 16; step++) {
+        var mid = (lo + hi) / 2
+        if (sizesAt(mid).total + gaps <= room) lo = mid
+        else hi = mid
+      }
+      return { sizes: sizesAt(lo).sizes, compact: false }
+    }
+
+    var chips = {}
+    for (var k = 0; k < ids.length; k++) chips[ids[k]] = root.chipW
+    return { sizes: chips, compact: true }
+  }
+  readonly property var cardSizes: root.cardLayout.sizes
+  readonly property bool compactCards: root.cardLayout.compact
 
   function sizeOf(id) {
     var size = root.cardSizes[id]
@@ -2843,7 +3068,8 @@ BarWidget {
     onOpenChanged: {
       if (!open) return
       // Reopened while its apps are still closing: show that, not the editor.
-      root.editMode = root.pendingDeletes[String(root.editingId)] !== undefined ? "closing" : "edit"
+      root.editMode = root.pendingDeletes[String(root.editingId)] !== undefined ? "closing"
+        : root.pendingCloses[String(root.editingId)] !== undefined ? "closingKeep" : "edit"
       nameField.text = root.customName(root.editingId)
       root.draftEmoji = root.customEmoji(root.editingId)
       root.draftIcon = root.customIcon(root.editingId)
@@ -3402,6 +3628,12 @@ BarWidget {
         }
 
         Button {
+          visible: root.editingId >= 0 && root.toplevelsOf(root.editingId).length > 0
+          text: "Close…"
+          onClicked: root.editMode = "confirmCloseKeep"
+        }
+
+        Button {
           text: "Delete…"
           foreground: Color.urgent
           onClicked: root.startDelete()
@@ -3429,9 +3661,9 @@ BarWidget {
       Text {
         textFormat: Text.PlainText
         width: parent.width
-        text: "Delete " + deleteColumn.title + "?"
+        text: (root.closingMode ? "Close " : "Delete ") + deleteColumn.title + "?"
         elide: Text.ElideRight
-        color: Color.urgent
+        color: root.closingMode ? root.previewFg : Color.urgent
         font.family: root.previewFont
         font.pixelSize: Style.font.body
         font.bold: true
@@ -3448,6 +3680,9 @@ BarWidget {
         renderType: Text.NativeRendering
         text: {
           var n = root.deleteWindows.length
+          if (root.editMode === "confirmCloseKeep") return "Close its " + n + (n === 1 ? " app" : " apps") + "? The card stays on the bar with its name, emoji and colour. Unsaved work may be lost."
+          if (root.editMode === "closingKeep") return "Closing " + n + (n === 1 ? " app" : " apps") + "… apps with unsaved work may ask first."
+          if (root.editMode === "closeKeepFailed") return n + (n === 1 ? " app is" : " apps are") + " still open. Save or close them yourself; the card stays either way."
           if (root.editMode === "closing") return "Closing " + n + (n === 1 ? " app" : " apps") + "… apps with unsaved work may ask first."
           if (root.editMode === "closeFailed") return n + (n === 1 ? " app is" : " apps are") + " still open. Close or save them yourself and the card goes once they're closed, or move them instead."
           if (root.editMode === "confirmClose") return "Close " + n + (n === 1 ? " app" : " apps") + "? Unsaved work in them may be lost."
@@ -3483,7 +3718,8 @@ BarWidget {
 
       // One row per window: icon, title, destination.
       Repeater {
-        model: root.editMode === "delete" || root.editMode === "closeFailed" ? root.deleteWindows : []
+        model: root.editMode === "delete" || root.editMode === "closeFailed"
+          || root.editMode === "confirmCloseKeep" || root.editMode === "closeKeepFailed" ? root.deleteWindows : []
 
         Item {
           required property var modelData
@@ -3561,10 +3797,23 @@ BarWidget {
         }
 
         Button {
-          visible: root.editMode !== "closing"
-          text: root.editMode === "delete" ? "Back" : "Cancel"
+          visible: root.editMode === "confirmCloseKeep"
+          text: "Yes, close apps"
+          onClicked: root.closeAndKeep()
+        }
+
+        Button {
+          visible: root.editMode === "closeKeepFailed"
+          text: "OK"
+          onClicked: root.cancelRename()
+        }
+
+        Button {
+          visible: root.editMode !== "closing" && root.editMode !== "closingKeep"
+            && root.editMode !== "closeKeepFailed"
+          text: root.editMode === "delete" || root.editMode === "confirmCloseKeep" ? "Back" : "Cancel"
           onClicked: {
-            if (root.editMode === "delete") root.editMode = "edit"
+            if (root.editMode === "delete" || root.editMode === "confirmCloseKeep") root.editMode = "edit"
             else if (root.editMode === "confirmClose") root.editMode = "delete"
             else {
               // Cancel after a failed close keeps the workspace.
