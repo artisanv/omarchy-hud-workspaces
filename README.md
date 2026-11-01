@@ -20,7 +20,7 @@ A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style 
 cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
 the order you see on the bar.
 
-Version 1.16.3 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
+Version 1.17.0 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
 
 **Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
 Hyprland versions may work; the widget warns in Settings when yours differs from the
@@ -42,7 +42,7 @@ Or from a release zip / folder:
    (the folder name and the `id` in `manifest.json` must both be `swordfish.workspaces`).
 2. Check the download and make the scripts executable:
    ```bash
-   sha256sum -c swordfish-hud-workspaces-v1.16.3.zip.sha256   # next to the zip
+   sha256sum -c swordfish-hud-workspaces-v1.17.0.zip.sha256   # next to the zip
    chmod +x ~/.config/omarchy/plugins/swordfish.workspaces/ws-*
    ```
 3. Put the widget on the bar in place of the stock workspaces widget:
@@ -105,7 +105,12 @@ PNG, JPG or WebP. The folder sits outside the plugin, so updating or reinstallin
 your icons. In the card editor they're in the **Your icons** tab: the little cut-corner
 card with a picture in it, next to 🕘.
 
-**Adding icons: the Icon library.** In the Your icons tab, click **Icon library…**. The
+**Quickest: Add icon from file….** In the Your icons tab, click **Add icon from file…**.
+The editor steps aside for the file chooser; pick an image and the editor comes back with
+that icon already on the card (copied into your icon folder). Cancel the chooser and the
+editor comes back unchanged. No dragging needed.
+
+**Adding many icons: the Icon library.** In the Your icons tab, click **Icon library…**. The
 editor makes way for a normal window that stays open, so you can put it next to your
 file manager:
 
@@ -484,6 +489,15 @@ the MIT licence; keep it with this plugin, or remove it from your own fork.
 ---
 
 ## Changelog
+
+- **1.17.0**: Icons and emoji no longer overlap neighbouring cards. An emoji is drawn in a
+  fixed box and shrinks to fit it, so wide colour-emoji glyphs and multi-part emoji (🧑‍💻,
+  flags, skin tones) stay inside their card, and card widths account for the emoji's real
+  width. Cards have a little more room between them (`Style.space(3)` instead of `1`), so
+  borders, the focus corners and the glide/slide animations never paint over a neighbour.
+  New **Add icon from file…** button in the card editor's Your icons tab: pick an image
+  and the editor returns with it set, since a file can't be dragged onto the editor (it
+  closes on any click outside it). The icon buttons wrap onto a second line when needed.
 
 - **1.16.3**: Security fix from the marketplace review: window titles in the hover preview
   (and every other text in the widget) are shown as plain text. Qt's default would read a

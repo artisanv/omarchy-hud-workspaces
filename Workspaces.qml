@@ -1981,6 +1981,24 @@ BarWidget {
     iconImport.running = true
   }
 
+  // "Add icon from file…" in the card editor: no drag needed. The editor is a
+  // panel that closes on any click outside it, so dropping a file onto it
+  // can't work. Instead the editor steps aside, the file chooser picks an
+  // image, and the editor comes back with that icon set (or unchanged if the
+  // chooser was cancelled).
+  function pickIconForCard() {
+    if (iconImport.running || root.editingId < 0) return
+    root.importThen = { mode: "card", id: root.editingId, draft: root.editorDraft() }
+    root.cancelRename()
+    root.ensureIconDir()
+    iconImport.command = ["bash", "-c",
+      'mapfile -t files < <(omarchy-file-select --title "Choose an icon for this card" ' +
+      '--extensions "svg png jpg jpeg webp")\n' +
+      'set -- "$1" "${files[@]}"\n' + root.importScript,
+      "bash", root.iconDir]
+    iconImport.running = true
+  }
+
   function cardItem(id) {
     for (var i = 0; i < grid.children.length; i++) {
       if (grid.children[i].modelData === id) return grid.children[i]
@@ -1994,6 +2012,18 @@ BarWidget {
     var then = root.importThen
     root.importThen = null
     if (then === null) return
+    // Card editor: reopen it with the chosen icon (draft kept either way).
+    if (then.mode === "card") {
+      var item = root.cardItem(then.id)
+      if (item === null) return
+      if (names.length > 0) {
+        then.draft.icon = names[0]
+        then.draft.emoji = ""
+      }
+      root.resumeDraft = { id: then.id, draft: then.draft, iconTab: true }
+      root.startRename(then.id, item)
+      return
+    }
     // Library: highlight what came in.
     root.libraryNew = root.libraryNew.filter(function(n) { return names.indexOf(n) === -1 }).concat(names)
     root.libraryNotice = names.length === 0 ? ""
@@ -2533,7 +2563,9 @@ BarWidget {
   // Chip geometry. The row is laid out by hand (slot positions + animated
   // translates) instead of by a GridLayout so every move can ease instead of
   // snapping when the order changes.
-  readonly property real hGap: Style.space(1)
+  // Room between cards so borders, the focus corners and the slide/glide
+  // animations never paint over a neighbour.
+  readonly property real hGap: Style.space(3)
   readonly property real vGap: Style.space(2)
   readonly property real chipW: root.vertical ? root.barSize : Style.space(20)
   readonly property real chipH: root.barSize
@@ -2562,6 +2594,10 @@ BarWidget {
   readonly property string emojiFont: "Noto Color Emoji"
   readonly property real emojiSize: Style.font.subtitle + 2
   readonly property real emojiGap: Style.space(3)
+  // Colour-emoji glyphs draw wider than their pixel size (and ZWJ / flag /
+  // skin-tone sequences wider still), so an emoji gets a fixed box this wide
+  // and shrinks to fit it instead of spilling into the next card.
+  readonly property real emojiBoxW: Math.ceil(root.emojiSize * 1.25)
 
   // A custom icon file, as is or (tint) filled with one colour through its
   // alpha, so one-colour icons follow the card text like the number does.
@@ -2678,14 +2714,24 @@ BarWidget {
       tintColor: cardLabel.labelColor
     }
 
+    // Fixed box (capped by maxWidth) with the glyph shrunk to fit, so a wide
+    // or multi-codepoint emoji can never paint past its card.
     Text {
       textFormat: Text.PlainText
       id: emojiText
       visible: cardLabel.icon === "" && cardLabel.emoji !== ""
       anchors.verticalCenter: parent.verticalCenter
+      width: cardLabel.maxWidth > 0
+        ? Math.min(Math.ceil(cardLabel.emojiPixelSize * 1.25), cardLabel.maxWidth)
+        : Math.ceil(cardLabel.emojiPixelSize * 1.25)
+      height: cardLabel.emojiPixelSize + 2
       text: cardLabel.emoji
       font.family: cardLabel.emojiFamily
       font.pixelSize: cardLabel.emojiPixelSize
+      fontSizeMode: Text.Fit
+      minimumPixelSize: 6
+      horizontalAlignment: Text.AlignHCenter
+      verticalAlignment: Text.AlignVCenter
       renderType: Text.QtRendering
     }
 
@@ -2694,7 +2740,7 @@ BarWidget {
       visible: cardLabel.label !== ""
       anchors.verticalCenter: parent.verticalCenter
       width: Math.min(implicitWidth, Math.max(0, cardLabel.maxWidth
-        - (emojiText.visible ? emojiText.implicitWidth + cardLabel.spacing : 0)
+        - (emojiText.visible ? emojiText.width + cardLabel.spacing : 0)
         - (iconMark.visible ? iconMark.width + cardLabel.spacing : 0)))
       elide: Text.ElideRight
       text: cardLabel.label
@@ -2722,7 +2768,8 @@ BarWidget {
         sizes[id] = root.vertical ? root.chipH : root.chipW
       } else {
         var w = labelMetrics.advanceWidth(root.customName(id)) + 2 * root.cardPad
-        if (root.hasMark(id)) w += root.emojiSize + root.emojiGap
+        if (root.customIcon(id) !== "") w += root.emojiSize + root.emojiGap
+        else if (root.customEmoji(id) !== "") w += root.emojiBoxW + root.emojiGap
         sizes[id] = Math.ceil(Math.max(root.chipW, Math.min(root.maxCardW, w)))
       }
     }
@@ -3090,7 +3137,7 @@ BarWidget {
           wrapMode: Text.WordWrap
           text: root.emojiIconTab
             ? (root.customIcons.length === 0
-              ? "No icons yet. Click Icon library\u2026 and drag image files into it, or put them in\n" +
+              ? "No icons yet. Click Add icon from file\u2026, or drag image files into the Icon library\u2026 window, or put them in\n" +
                 root.iconDir.replace(Quickshell.env("HOME"), "~")
               : "No icon matches")
             : root.allEmojis.length === 0 ? "Emoji list unavailable"
@@ -3102,21 +3149,25 @@ BarWidget {
         }
       }
 
-      // Your icons tab: the icon library window (drop files in), the folder,
-      // tint for one-colour icons.
-      Row {
+      // Your icons tab: pick a file straight onto this card, the icon library
+      // window (drop files in), the folder, tint for one-colour icons. A Flow
+      // so the buttons wrap instead of running past the editor's edge.
+      Flow {
         visible: root.emojiIconTab
         width: parent.width
         spacing: Style.space(6)
 
         Button {
-          anchors.verticalCenter: parent.verticalCenter
+          text: "Add icon from file\u2026"
+          onClicked: root.pickIconForCard()
+        }
+
+        Button {
           text: "Icon library\u2026"
           onClicked: root.openIconLibrary()
         }
 
         Button {
-          anchors.verticalCenter: parent.verticalCenter
           text: "Open folder"
           onClicked: root.openIconFolder()
         }
