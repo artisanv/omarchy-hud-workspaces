@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "swordfish.workspaces",
   "name": "HUD Workspaces",
-  "version": "1.18.0",
+  "version": "1.19.0",
   "author": "Nasser Al-Ostath",
-  "description": "HUD-geometric workspace cards with hover room preview, drag-reorder, name, emoji or custom icon and colour per workspace, window-drop, saved rooms",
+  "description": "HUD-geometric workspace cards with hover room preview, drag-reorder, name, emoji or custom icon and colour per workspace, window-drop, saved rooms, overflow stack",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "HUD Workspaces",
-    "description": "HUD-geometric workspace cards with hover room preview, drag-reorder, name, emoji or custom icon and colour per workspace, window-drop, saved rooms",
+    "description": "HUD-geometric workspace cards with hover room preview, drag-reorder, name, emoji or custom icon and colour per workspace, window-drop, saved rooms, overflow stack",
     "category": "Compositor",
     "allowMultiple": false
   }

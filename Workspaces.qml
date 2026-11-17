@@ -742,9 +742,11 @@ BarWidget {
   function chipShift(id) {
     if (root.dragId < 0 || root.dropIndex < 0) return 0
 
-    var ids = workspaceIds()
+    // Bar cards only; a drop into the stack (an index past the bar) closes
+    // the gap the held card leaves.
+    var ids = root.barIds
     var from = ids.indexOf(root.dragId)
-    var p = root.dropIndex
+    var p = Math.min(root.dropIndex, ids.length - 1)
     if (from === -1 || p === from) return 0
 
     var next = root.reordered(ids, from, p)
@@ -760,7 +762,7 @@ BarWidget {
   // cards differ in width once named. The bar is only ~30px thick, so
   // drifting a little off it keeps the drag alive; pulling well away cancels.
   function updateDropIndex(sceneX, sceneY) {
-    var ids = workspaceIds()
+    var ids = root.barIds
     var from = ids.indexOf(root.dragId)
     var local = root.mapFromItem(null, sceneX, sceneY)
     var along = root.vertical ? local.y : local.x
@@ -770,9 +772,17 @@ BarWidget {
     var held = from === -1 ? 0 : root.sizeOf(root.dragId)
 
     if (from === -1 || ids.length === 0 || across < -slack || across > thickness + slack
-        || along < -held || along > root.rowLength + held) {
+        || along < -held || along > root.cardsEnd + held) {
       root.dropIndex = -1
       root.dropTargetId = -1
+      return
+    }
+
+    // Over the stack chip: the card goes to the end of the order, into the
+    // stack (the first stacked card takes its place on the bar if it fits).
+    if (root.hasStack && along > root.stackPos - root.rowGap / 2) {
+      root.dropIndex = root.displayIds.length - 1
+      root.dropTargetId = root.stackTarget
       return
     }
 
@@ -870,6 +880,7 @@ BarWidget {
 
   Component.onCompleted: {
     root.syncIds()
+    root.syncBar()
     root.applyTransition()
     raiseInputStack()
     root.ensureIconDir()
@@ -928,6 +939,7 @@ BarWidget {
   property double lastPressTime: 0
 
   function chipPressed(id, anchorItem, button) {
+    root.stackOpen = false
     if (button === Qt.RightButton) {
       root.lastPressId = -1
       root.startRename(id, anchorItem)
@@ -2109,7 +2121,8 @@ BarWidget {
     for (var i = 0; i < grid.children.length; i++) {
       if (grid.children[i].modelData === id) return grid.children[i]
     }
-    return null
+    // A card in the overflow stack: its editor hangs off the stack chip.
+    return root.stackIds.indexOf(id) !== -1 ? stackBtn : null
   }
 
   property var resumeDraft: null
@@ -2870,12 +2883,23 @@ BarWidget {
   // centre or right modules). `fitRoom` is the space from the start of this
   // widget to the first module after it that isn't in its own section,
   // minus the widths of the modules that follow it in its own section. It is
-  // measured from the bar itself every couple of seconds (the clock changes
-  // width) and whenever the cards change. When the cards don't fit, named
-  // cards shorten their names (elided, full name in the tooltip); if that
-  // still isn't enough, every card becomes a compact chip showing just its
-  // emoji, icon or number.
+  // measured from the bar itself a few times a second (the clock and the
+  // indicators change width) and whenever the cards change. When the cards
+  // don't fit, named cards first shorten their names (elided, full name in
+  // the tooltip) down to a readable length. If that still isn't enough:
+  //   overflow "stack" (default): the cards that fit stay, the rest go into
+  //     a stack chip that fans them out in a popup on click;
+  //   overflow "shrink": names shorten further, then every card becomes a
+  //     compact chip showing just its emoji, icon or number.
   property real fitRoom: Infinity
+  readonly property bool stackOverflow: String(root.setting("overflow", "stack")) !== "shrink"
+  readonly property real stackW: Style.space(40)
+  // With more cards than this, every card goes into the stack and the chip
+  // shows the active one (0: only the cards that don't fit are stacked).
+  readonly property int stackAfter: {
+    var n = Number(root.setting("stackAfter", 0))
+    return isFinite(n) && n > 0 ? Math.min(10, Math.floor(n)) : 0
+  }
 
   function isModuleSlot(item) {
     return item && item.entry !== undefined && item.region !== undefined && item.moduleName !== undefined
@@ -2893,6 +2917,7 @@ BarWidget {
 
   function measureRoom() {
     var room = Infinity
+    var revealed = false
     try {
       if (!root.vertical && root.bar && root.visible) {
         var mySlot = root.parent
@@ -2908,6 +2933,7 @@ BarWidget {
         root.collectSlots(top, slots)
         for (var i = 0; i < slots.length; i++) {
           var s = slots[i]
+          if (s.activeItem && s.activeItem.revealInactiveIndicators === true) revealed = true
           if (s === mySlot || !s.visible || s.width <= 0) continue
           var sx = s.mapToItem(null, 0, 0).x
           if (sx <= slotStart) continue
@@ -2919,12 +2945,57 @@ BarWidget {
     } catch (e) {
       room = Infinity
     }
-    if (Math.abs(room - root.fitRoom) > 0.5 || (room === Infinity) !== (root.fitRoom === Infinity))
-      root.fitRoom = room
+    root.applyRoom(room, revealed)
+  }
+
+  // Hovering the bar makes it reveal its hidden indicators, which widens
+  // their section and takes room from the cards, then gives it back when the
+  // pointer leaves. Fitting to whatever is there at the moment made the cards
+  // re-fit under the pointer on every hover (and cover the indicators until
+  // they did). So the cards always leave room for the revealed state:
+  // `fitReserve` is how much the reveal takes, learned whenever it happens
+  // and kept in the `fitReserve` setting so it is known from the start.
+  property var localReserve: null
+  readonly property real fitReserve: {
+    var saved = Number(root.setting("fitReserve", 0))
+    return root.localReserve !== null ? root.localReserve : (isFinite(saved) && saved > 0 ? saved : 0)
+  }
+  property real calmRoom: Infinity      // room last measured with nothing revealed
+  property bool wasRevealed: false
+  property bool learnReserve: false
+  property double revealFlipAt: 0
+
+  function applyRoom(room, revealed) {
+    var now = Date.now()
+    if (revealed !== root.wasRevealed) {
+      root.wasRevealed = revealed
+      root.revealFlipAt = now
+      root.learnReserve = revealed
+    }
+    var fit = room
+    if (room !== Infinity) {
+      // The reveal animates: keep the last fit until it has settled.
+      if (now - root.revealFlipAt < 600) return
+      if (revealed) {
+        if (root.learnReserve && root.calmRoom !== Infinity) {
+          root.learnReserve = false
+          var reserve = Math.max(0, Math.round(root.calmRoom - room))
+          if (Math.abs(reserve - root.fitReserve) > 1) {
+            root.localReserve = reserve
+            root.persist(root.barSet("fitReserve", reserve, true))
+          }
+        }
+      } else {
+        root.calmRoom = room
+        fit = Math.max(0, room - root.fitReserve)
+      }
+    }
+    if (Math.abs(fit - root.fitRoom) > 0.5 || (fit === Infinity) !== (root.fitRoom === Infinity))
+      root.fitRoom = fit
   }
 
   Timer {
-    interval: 2000
+    interval: 400
     repeat: true
     running: !root.vertical && root.bar !== null
     triggeredOnStart: true
@@ -2953,50 +3024,80 @@ BarWidget {
 
   // Smallest a named card gets before going compact: its mark plus "Ab…".
   function minNamedSize(id) {
-    return Math.ceil(Math.max(root.chipW, root.markWidth(id) + labelMetrics.advanceWidth("Ab…")
-      + 2 * root.cardPad))
+    return Math.min(root.naturalSize(id), Math.ceil(Math.max(root.chipW, root.markWidth(id)
+      + labelMetrics.advanceWidth("Ab…") + 2 * root.cardPad)))
   }
 
+  // Smallest a named card gets before cards start moving into the stack:
+  // its mark plus a name that can still be read.
+  function readableSize(id) {
+    return Math.min(root.naturalSize(id), Math.ceil(Math.max(root.chipW, root.markWidth(id)
+      + labelMetrics.advanceWidth("Abcdef…") + 2 * root.cardPad)))
+  }
+
+  // { sizes: id -> width, compact, shown: how many cards stay on the bar }
   readonly property var cardLayout: {
     var ids = root.displayIds
+    var n = ids.length
     var natural = {}
     var total = 0
-    for (var i = 0; i < ids.length; i++) {
+    for (var i = 0; i < n; i++) {
       natural[ids[i]] = root.naturalSize(ids[i])
       total += natural[ids[i]]
     }
-    var gaps = Math.max(0, ids.length - 1) * root.rowGap
+    function gapsOf(count) { return Math.max(0, count - 1) * root.rowGap }
+    if (!root.vertical && root.stackOverflow && root.stackAfter > 0 && n > root.stackAfter)
+      return { sizes: {}, compact: false, shown: 0 }
     var room = root.rowRoom
-    if (root.vertical || room === Infinity || total + gaps <= room)
-      return { sizes: natural, compact: false }
+    if (root.vertical || room === Infinity || total + gapsOf(n) <= room)
+      return { sizes: natural, compact: false, shown: n }
 
-    // Cap named cards at one width, the largest that fits.
-    function sizesAt(cap) {
+    var floors = {}
+    for (var f = 0; f < n; f++)
+      floors[ids[f]] = root.stackOverflow ? root.readableSize(ids[f]) : root.minNamedSize(ids[f])
+
+    // The first `count` cards with named ones capped at one width.
+    function sizesAt(cap, count) {
       var out = {}
       var sum = 0
-      for (var j = 0; j < ids.length; j++) {
+      for (var j = 0; j < count; j++) {
         var id = ids[j]
         var w = natural[id]
-        if (root.customName(id) !== "") w = Math.max(root.minNamedSize(id), Math.min(w, Math.floor(cap)))
+        if (root.customName(id) !== "") w = Math.max(floors[id], Math.min(w, Math.floor(cap)))
         out[id] = w
         sum += w
       }
       return { sizes: out, total: sum }
     }
-    var lo = 0
-    var hi = root.maxCardW
-    if (sizesAt(lo).total + gaps <= room) {
+    // Sizes for the first `count` cards at the largest cap that fits in
+    // `space`, or null when they don't fit even at their smallest.
+    function fit(count, space) {
+      if (sizesAt(0, count).total + gapsOf(count) > space) return null
+      var lo = 0
+      var hi = root.maxCardW
       for (var step = 0; step < 16; step++) {
         var mid = (lo + hi) / 2
-        if (sizesAt(mid).total + gaps <= room) lo = mid
+        if (sizesAt(mid, count).total + gapsOf(count) <= space) lo = mid
         else hi = mid
       }
-      return { sizes: sizesAt(lo).sizes, compact: false }
+      return sizesAt(lo, count).sizes
+    }
+
+    var all = fit(n, room)
+    if (all !== null) return { sizes: all, compact: false, shown: n }
+
+    if (root.stackOverflow) {
+      var space = room - root.stackW - root.rowGap
+      for (var count = n - 1; count >= 1; count--) {
+        var some = fit(count, space)
+        if (some !== null) return { sizes: some, compact: false, shown: count }
+      }
+      return { sizes: {}, compact: false, shown: 0 }
     }
 
     var chips = {}
-    for (var k = 0; k < ids.length; k++) chips[ids[k]] = root.chipW
-    return { sizes: chips, compact: true }
+    for (var k = 0; k < n; k++) chips[ids[k]] = root.chipW
+    return { sizes: chips, compact: true, shown: n }
   }
   readonly property var cardSizes: root.cardLayout.sizes
   readonly property bool compactCards: root.cardLayout.compact
@@ -3023,12 +3124,112 @@ BarWidget {
     return next
   }
 
-  readonly property var starts: root.startsFor(root.displayIds)
+  // The cards on the bar (`barIds`, the first cards in bar order) and the
+  // ones in the overflow stack. `barIds` is only reassigned when the list
+  // really changes, like `displayIds`, so the cards aren't rebuilt on every
+  // layout pass.
+  property var barIds: []
+  readonly property var stackIds: root.displayIds.filter(function(id) { return root.barIds.indexOf(id) === -1 })
+  readonly property bool hasStack: root.stackIds.length > 0
+  onCardLayoutChanged: root.syncBar()
+  onHasStackChanged: if (!root.hasStack) root.stackOpen = false
+  onEditingIdChanged: if (root.editingId < 0) Qt.callLater(root.syncBar)
+  onDragIdChanged: if (root.dragId < 0) Qt.callLater(root.syncBar)
+
+  function syncBar() {
+    // A change here rebuilds the cards, which would close an open editor
+    // (it hangs off a card) and drop a held card; wait until they're done.
+    if (root.editingId >= 0 || root.dragId >= 0) return
+    var next = root.displayIds.slice(0, root.cardLayout.shown)
+    var cur = root.barIds
+    if (next.length === cur.length) {
+      var same = true
+      for (var i = 0; i < next.length && same; i++) same = next[i] === cur[i]
+      if (same) return
+    }
+    root.barIds = next
+  }
+
+  readonly property var starts: root.startsFor(root.barIds)
   readonly property real rowLength: {
-    var n = root.displayIds.length
+    var n = root.barIds.length
     if (n === 0) return 0
-    var last = root.displayIds[n - 1]
+    var last = root.barIds[n - 1]
     return root.starts[n - 1] + root.sizeOf(last)
+  }
+  // Where the stack chip sits, and where the cards (stack chip included) end.
+  readonly property real stackPos: root.rowLength + (root.barIds.length > 0 ? root.rowGap : 0)
+  readonly property real cardsEnd: root.hasStack ? root.stackPos + root.stackChipW : root.rowLength
+
+  // Every card is in the stack: the chip then also names the active card.
+  readonly property bool stackAll: root.hasStack && root.barIds.length === 0
+  readonly property string stackLabel: {
+    var id = root.stackActiveId
+    if (!root.stackAll || id < 0) return ""
+    return root.customName(id) !== "" ? root.customName(id) : (root.hasMark(id) ? "" : root.numberLabel(id))
+  }
+  readonly property real stackGap: Style.space(4)
+  readonly property real stackCountW: Math.ceil(labelMetrics.advanceWidth(String(root.stackIds.length)))
+    + (root.stackAll ? Style.space(10) : 0)
+  // `stackW` is what the fit reserves for the chip; this is what it takes.
+  readonly property real stackChipW: {
+    var id = root.stackActiveId
+    if (!root.stackAll || id < 0) return root.stackW
+    var mark = !root.hasMark(id) ? 0 : (root.customIcon(id) !== "" ? root.emojiSize : root.emojiBoxW)
+    var text = root.stackLabel !== "" ? labelMetrics.advanceWidth(root.stackLabel) : 0
+    var w = mark + (mark > 0 && text > 0 ? root.emojiGap : 0) + text + root.stackGap + root.stackCountW
+      + 2 * root.cardPad
+    // The name gets as much room as it would on a card.
+    var most = root.maxCardW + root.stackGap + root.stackCountW + 2 * root.cardPad
+    var cap = root.rowRoom === Infinity ? most : Math.min(most, root.rowRoom)
+    return Math.ceil(Math.max(root.stackW, Math.min(w, cap)))
+  }
+
+  // ---- Overflow stack ----
+  // The focused workspace when its card is in the stack, else -1: the stack
+  // chip then wears that card's colour, so the active workspace always shows.
+  readonly property int stackActiveId: {
+    var fw = Hyprland.focusedWorkspace
+    return fw !== null && root.stackIds.indexOf(fw.id) !== -1 ? fw.id : -1
+  }
+  readonly property bool stackOccupied: {
+    for (var i = 0; i < root.stackIds.length; i++) {
+      var ws = root.workspaceById(root.stackIds[i])
+      if (ws !== null && ws.toplevels.values.length > 0) return true
+    }
+    return false
+  }
+  // Drop target id while a dragged card hovers the stack chip.
+  readonly property int stackTarget: -2
+  property bool stackOpen: false
+  // Rows in the popup have room for the whole name (a bar card is capped).
+  readonly property real stackRowW: {
+    var w = Style.space(120)
+    for (var i = 0; i < root.stackIds.length; i++) {
+      var id = root.stackIds[i]
+      var name = root.customName(id) !== "" ? root.customName(id) : "Workspace " + root.numberLabel(id)
+      w = Math.max(w, root.markWidth(id) + labelMetrics.advanceWidth(name) + 2 * root.cardPad)
+    }
+    return Math.ceil(Math.min(w, Style.space(280)))
+  }
+
+  QtObject {
+    id: stackOwner
+    function close() { root.stackOpen = false }
+  }
+
+  function toggleStack() {
+    root.cancelRename()
+    root.previewCloseNow()
+    root.stackOpen = !root.stackOpen
+  }
+
+  // Bring a stacked card to the front of the bar, where it is sure to show.
+  function moveToFront(id) {
+    var next = [id].concat(root.displayIds.filter(function(n) { return n !== id }))
+    root.localOrder = next
+    root.syncIds()
+    root.persistOrder(next)
   }
 
   function slotPos(i) {
@@ -3039,7 +3240,7 @@ BarWidget {
   // The row plus a trailing slot for the "+" button.
   implicitWidth: root.vertical
     ? root.chipW
-    : root.rowLength + root.hGap + root.chipW + root.trailingGap
+    : root.cardsEnd + root.hGap + root.chipW + root.trailingGap
   implicitHeight: root.vertical
     ? root.rowLength + root.vGap + root.chipH
     : root.chipH
@@ -4155,6 +4356,37 @@ BarWidget {
         onClicked: root.saveSetting("activeStyle", root.solidActive ? "outline" : "solid")
       }
 
+      Toggle {
+        width: parent.width
+        label: "Stack cards that don't fit"
+        description: root.stackOverflow ? "Extra cards wait in a stack chip; click it to fan them out"
+          : "Cards shrink to compact chips so all of them stay on the bar"
+        checked: root.stackOverflow
+        onClicked: root.saveSetting("overflow", root.stackOverflow ? "shrink" : "stack")
+      }
+
+      BodyText {
+        visible: root.stackOverflow
+        text: "Stack every card once there are more than:"
+      }
+
+      Flow {
+        visible: root.stackOverflow
+        width: parent.width
+        spacing: Style.space(6)
+
+        Repeater {
+          model: [0, 1, 2, 3, 4, 5, 6]
+
+          Chip {
+            required property int modelData
+            label: modelData === 0 ? "Off" : String(modelData)
+            selected: root.stackAfter === modelData
+            onPicked: root.saveSetting("stackAfter", modelData, true)
+          }
+        }
+      }
+
       SectionTitle {
         topPadding: Style.space(4)
         text: "Startup"
@@ -4603,6 +4835,7 @@ BarWidget {
         text: "\u2022 Click a card to go to it. Hover it to see its windows; click one to focus it.\n" +
           "\u2022 Drag a card to reorder. Drag a window onto a card to move it there.\n" +
           "\u2022 Scroll over the bar or swipe with 3 fingers for the next or previous card.\n" +
+          "\u2022 Cards that don't fit wait in the stack chip (a little deck with a count) before +. Click it to fan them out; click one to go there, right-click to edit it, the arrow puts it first on the bar. Drag a card onto the chip to put it in the stack. Settings can stack every card once there are more than a number you pick.\n" +
           "\u2022 + opens a new workspace. Right-click + for this panel."
       }
 
@@ -4641,7 +4874,7 @@ BarWidget {
       SectionTitle { topPadding: Style.space(4); text: "Settings" }
       BodyText {
         text: "Transition style, motion, speed and distance; swipe and scroll wrap-around; " +
-          "keys following the bar; bold active card; fresh start after reboot."
+          "keys following the bar; bold active card; stack or shrink cards that don't fit; fresh start after reboot."
       }
     }
 
@@ -4892,7 +5125,7 @@ BarWidget {
     anchors.fill: parent
 
     Repeater {
-      model: root.workspaceIds()
+      model: root.barIds
 
       WidgetButton {
         id: button
@@ -5297,6 +5530,173 @@ BarWidget {
         }
       }
     }
+    // The overflow stack: the cards that don't fit on the bar, behind one
+    // chip. Click fans them out in a popup (stackCard). It wears the active
+    // card's colour while the focused workspace is inside it, and takes a
+    // dragged card (dropped here, the card goes to the end of the order).
+    WidgetButton {
+      id: stackBtn
+      bar: root.bar
+      visible: root.hasStack
+      text: String(root.stackIds.length)
+      labelVisible: false
+      tooltipText: root.stackOpen ? ""
+        : root.stackIds.length + (root.stackAll ? " workspaces" : root.stackIds.length === 1 ? " more workspace" : " more workspaces")
+          + " — click to show"
+      fixedWidth: root.stackChipW
+      fixedHeight: root.chipH
+      x: root.stackPos
+      y: 0
+      opacity: root.stackOccupied || focused || root.stackOpen || isTarget ? 1 : 0.5
+      onPressed: function(mouseButton) { root.toggleStack() }
+      onWheelMoved: function(delta) { root.scrollWorkspaces(delta) }
+
+      readonly property bool focused: root.stackActiveId >= 0
+      readonly property bool isTarget: root.dragId >= 0 && root.dropTargetId === root.stackTarget
+      readonly property string tintHex: focused ? root.customColor(root.stackActiveId) : ""
+      readonly property color tint: tintHex !== "" ? tintHex : Color.accent
+      readonly property bool solid: focused && root.solidActive
+      readonly property color onTint: root.contrastOn(tint)
+      readonly property color ink: solid ? onTint
+        : focused ? tint
+        : Util.alpha(root.barFg, root.stackOccupied || root.stackOpen ? 1 : 0.6)
+      readonly property string emoji: focused ? root.customEmoji(root.stackActiveId) : ""
+      readonly property string iconSrc: focused ? root.iconUrl(root.customIcon(root.stackActiveId)) : ""
+
+      onIsTargetChanged: if (isTarget) stackPop.restart()
+
+      SequentialAnimation {
+        id: stackPop
+        PropertyAnimation { target: stackRing; property: "scale"; from: 0.95; to: 1; duration: Style.duration(160); easing.type: Easing.OutCubic }
+      }
+
+      Shape {
+        id: stackRing
+        anchors.fill: parent
+        z: -1
+        transformOrigin: Item.Center
+        visible: stackBtn.isTarget
+
+        ShapePath {
+          strokeWidth: 1
+          strokeColor: Color.accent
+          fillColor: Util.alpha(Color.accent, 0.18)
+          PathSvg { path: root.panelPath(stackBtn.width, stackBtn.height) }
+        }
+      }
+
+      Shape {
+        anchors.fill: parent
+        z: -2
+
+        ShapePath {
+          strokeWidth: stackBtn.solid ? 2 : 1
+          strokeColor: stackBtn.solid ? Qt.lighter(stackBtn.tint, 1.3)
+            : stackBtn.focused ? Util.alpha(stackBtn.tint, 0.95)
+            : Util.alpha(root.barFg, root.stackOpen ? 0.8 : (root.stackOccupied ? 0.5 : 0.28))
+          fillColor: stackBtn.solid ? Util.alpha(stackBtn.tint, 0.92)
+            : stackBtn.focused ? Util.alpha(stackBtn.tint, 0.22)
+            : Util.alpha(root.barFg, root.stackOpen ? 0.18 : (root.stackOccupied ? 0.12 : 0.06))
+          PathSvg { path: root.panelPath(stackBtn.width, stackBtn.height) }
+        }
+      }
+
+      // Soft glow while the active workspace is inside.
+      Shape {
+        anchors.fill: parent
+        z: -3
+        visible: stackBtn.solid
+        opacity: 0.45
+
+        ShapePath {
+          strokeWidth: 5
+          strokeColor: Util.alpha(stackBtn.tint, 0.6)
+          fillColor: "transparent"
+          joinStyle: ShapePath.RoundJoin
+          PathSvg { path: root.panelPath(stackBtn.width, stackBtn.height) }
+        }
+      }
+
+      Row {
+        z: -1
+        anchors.centerIn: parent
+        spacing: root.stackGap
+
+        // A little deck of three cards, or the active card's emoji or icon
+        // (and its name, once every card is in the stack).
+        Item {
+          id: deck
+          visible: stackBtn.emoji === "" && stackBtn.iconSrc === "" && root.stackLabel === ""
+          anchors.verticalCenter: parent.verticalCenter
+          readonly property real unit: Math.max(2, Math.round(Style.spaceReal(2)))
+          width: unit * 6
+          height: unit * 5
+
+          Repeater {
+            model: 3
+
+            Rectangle {
+              required property int index
+              x: (2 - index) * deck.unit
+              y: index * deck.unit
+              width: deck.unit * 4
+              height: deck.unit * 3
+              radius: 1
+              color: index === 2 ? stackBtn.ink : "transparent"
+              border.width: 1
+              border.color: Util.alpha(stackBtn.ink, index === 2 ? 1 : (index === 1 ? 0.75 : 0.45))
+            }
+          }
+        }
+
+        CardLabel {
+          visible: !deck.visible
+          anchors.verticalCenter: parent.verticalCenter
+          emoji: stackBtn.emoji
+          icon: stackBtn.iconSrc
+          iconTint: stackBtn.focused && root.customIconTint(root.stackActiveId)
+          label: root.stackLabel
+          maxWidth: stackBtn.width - 2 * root.cardPad - root.stackGap - root.stackCountW
+          labelColor: stackBtn.ink
+        }
+
+        // How many cards are inside; a pill once the chip also carries a name.
+        Rectangle {
+          anchors.verticalCenter: parent.verticalCenter
+          width: root.stackCountW
+          height: stackCount.implicitHeight + (root.stackAll ? Style.space(2) : 0)
+          radius: height / 2
+          color: root.stackAll ? Util.alpha(stackBtn.ink, 0.2) : "transparent"
+
+          Text {
+            id: stackCount
+            textFormat: Text.PlainText
+            anchors.centerIn: parent
+            text: String(root.stackIds.length)
+            color: stackBtn.ink
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            font.bold: true
+            renderType: Text.NativeRendering
+          }
+        }
+      }
+
+      Rectangle {
+        visible: stackBtn.focused || root.stackOccupied
+        z: -1
+        anchors {
+          horizontalCenter: parent.horizontalCenter
+          bottom: parent.bottom
+          bottomMargin: stackBtn.focused ? 2 : 3
+        }
+        width: Math.max(6, Math.floor(parent.width * (stackBtn.focused ? 0.4 : 0.3)))
+        height: stackBtn.focused ? 2 : 1.5
+        radius: stackBtn.focused ? 1 : 0
+        color: stackBtn.focused ? (stackBtn.solid ? stackBtn.onTint : stackBtn.tint) : Util.alpha(root.barFg, 0.7)
+      }
+    }
+
     WidgetButton {
       id: addBtn
       text: "+"
@@ -5304,9 +5704,10 @@ BarWidget {
       tooltipText: "Add workspace · right-click for settings, rooms & help"
       fixedWidth: root.chipW
       fixedHeight: root.chipH
-      x: root.vertical ? 0 : root.rowLength + root.hGap
+      x: root.vertical ? 0 : root.cardsEnd + root.hGap
       y: root.vertical ? root.rowLength + root.vGap : 0
       onPressed: function(button) {
+        root.stackOpen = false
         if (button === Qt.RightButton) {
           root.cancelRename()
           root.previewCloseNow()
@@ -5320,6 +5721,192 @@ BarWidget {
         var nid = root.nextWorkspaceId()
         if (root.hiddenSet[nid]) root.unhideWorkspace(nid)
         root.focusWorkspace(nid)
+      }
+    }
+  }
+
+  // The stack fanned out: one row per stacked card, dealt in one after the
+  // other from the chip. Click a row to go there, right-click to edit it,
+  // the arrow moves it to the front of the bar. Click-mode PopupCard, so a
+  // click anywhere else closes it.
+  PopupCard {
+    id: stackCard
+    anchorItem: stackBtn
+    owner: stackOwner
+    bar: root.bar
+    open: root.stackOpen && root.hasStack
+    contentWidth: stackCard.fittedContentWidth(root.stackRowW + root.chipH + Style.space(6)
+      + 2 * stackCard.padding + Style.space(8))
+    contentHeight: stackCard.fittedContentHeight(stackColumn.implicitHeight)
+
+    Column {
+      id: stackColumn
+      anchors.fill: parent
+      spacing: Style.space(6)
+
+      Repeater {
+        model: root.stackIds
+
+        Item {
+          id: stackRow
+          required property int modelData
+          required property int index
+
+          readonly property var workspace: root.workspaceById(modelData)
+          readonly property bool occupied: workspace !== null && workspace.toplevels.values.length > 0
+          readonly property bool focused: Hyprland.focusedWorkspace !== null && Hyprland.focusedWorkspace.id === modelData
+          readonly property string tintHex: root.customColor(modelData)
+          readonly property color tint: tintHex !== "" ? tintHex : Color.accent
+          readonly property bool solid: focused && root.solidActive
+          readonly property color onTint: root.contrastOn(tint)
+          readonly property bool hovered: stackRowMouse.containsMouse
+          // 0 → 1 as the row is dealt in: each row fades in and settles
+          // down from the chip a beat after the one above it.
+          property real reveal: 1
+
+          width: stackColumn.width
+          height: root.chipH
+          opacity: reveal
+          scale: 0.97 + 0.03 * reveal
+          transformOrigin: Item.Top
+          transform: Translate {
+            y: (1 - stackRow.reveal) * -Style.space(8)
+          }
+
+          function deal() {
+            fanIn.stop()
+            stackRow.reveal = 0
+            fanIn.restart()
+          }
+
+          SequentialAnimation {
+            id: fanIn
+            PauseAnimation { duration: Style.duration(Math.min(stackRow.index, 4) * 25) }
+            NumberAnimation {
+              target: stackRow
+              property: "reveal"
+              to: 1
+              duration: Style.duration(180)
+              easing.type: Easing.Bezier
+              easing.bezierCurve: Style.easeOut
+            }
+          }
+
+          Connections {
+            target: root
+            function onStackOpenChanged() { if (root.stackOpen) stackRow.deal() }
+          }
+
+          Item {
+            id: plate
+            width: parent.width - root.chipH - Style.space(6)
+            height: parent.height
+
+            Component.onCompleted: if (root.stackOpen) stackRow.deal()
+
+            Shape {
+              anchors.fill: parent
+
+              ShapePath {
+                strokeWidth: stackRow.solid ? 2 : 1
+                strokeColor: stackRow.solid ? Qt.lighter(stackRow.tint, 1.3)
+                  : stackRow.focused ? Util.alpha(stackRow.tint, 0.95)
+                  : stackRow.tintHex !== "" ? Util.alpha(stackRow.tint, stackRow.hovered ? 1 : (stackRow.occupied ? 0.7 : 0.4))
+                  : Util.alpha(Color.foreground, stackRow.hovered ? 0.85 : (stackRow.occupied ? 0.5 : 0.28))
+                fillColor: stackRow.solid ? Util.alpha(stackRow.tint, 0.92)
+                  : stackRow.focused ? Util.alpha(stackRow.tint, 0.22)
+                  : stackRow.tintHex !== "" ? Util.alpha(stackRow.tint, stackRow.hovered ? 0.26 : (stackRow.occupied ? 0.18 : 0.08))
+                  : Util.alpha(Color.foreground, stackRow.hovered ? 0.18 : (stackRow.occupied ? 0.12 : 0.06))
+                PathSvg { path: root.panelPath(plate.width, plate.height) }
+              }
+            }
+
+            CardLabel {
+              x: root.cardPad
+              anchors.verticalCenter: parent.verticalCenter
+              emoji: root.customEmoji(stackRow.modelData)
+              icon: root.iconUrl(root.customIcon(stackRow.modelData))
+              iconTint: root.customIconTint(stackRow.modelData)
+              label: root.customName(stackRow.modelData) !== "" ? root.customName(stackRow.modelData)
+                : "Workspace " + root.numberLabel(stackRow.modelData)
+              maxWidth: plate.width - 2 * root.cardPad
+              labelColor: stackRow.solid ? stackRow.onTint
+                : stackRow.focused ? stackRow.tint
+                : stackRow.tintHex !== "" ? Util.alpha(stackRow.tint, stackRow.occupied ? 1 : 0.6)
+                : Util.alpha(Color.foreground, stackRow.occupied ? 1 : 0.6)
+              opacity: hasMark && !stackRow.occupied && !stackRow.focused ? 0.6 : 1
+            }
+
+            Rectangle {
+              visible: stackRow.occupied || stackRow.focused
+              anchors {
+                horizontalCenter: parent.horizontalCenter
+                bottom: parent.bottom
+                bottomMargin: stackRow.focused ? 2 : 3
+              }
+              width: Math.max(6, Math.floor(parent.width * (stackRow.focused ? 0.4 : 0.3)))
+              height: stackRow.focused ? 2 : 1.5
+              color: stackRow.focused ? (stackRow.solid ? stackRow.onTint : stackRow.tint)
+                : Util.alpha(Color.foreground, 0.7)
+            }
+
+            MouseArea {
+              id: stackRowMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              acceptedButtons: Qt.LeftButton | Qt.RightButton
+              cursorShape: Qt.PointingHandCursor
+              onClicked: function(mouse) {
+                var id = stackRow.modelData
+                root.stackOpen = false
+                if (mouse.button === Qt.RightButton) root.startRename(id, stackBtn)
+                else root.focusWorkspace(id)
+              }
+            }
+          }
+
+          // Move this card to the front of the bar.
+          Rectangle {
+            anchors.right: parent.right
+            width: root.chipH
+            height: root.chipH
+            radius: Style.space(4)
+            color: frontMouse.containsMouse ? Util.alpha(Color.accent, 0.22) : "transparent"
+            border.width: 1
+            border.color: frontMouse.containsMouse ? Color.accent : Util.alpha(Color.foreground, 0.25)
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.centerIn: parent
+              text: root.bar && root.bar.position === "bottom" ? "↓" : "↑"
+              color: frontMouse.containsMouse ? Color.accent : Color.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+              font.bold: true
+              renderType: Text.NativeRendering
+            }
+
+            MouseArea {
+              id: frontMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.moveToFront(stackRow.modelData)
+            }
+          }
+        }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        wrapMode: Text.WordWrap
+        text: "Click: go there · Right-click: edit · "
+          + (root.bar && root.bar.position === "bottom" ? "↓" : "↑") + (root.stackAll ? ": first in the list" : ": first on the bar")
+        color: Util.alpha(Color.foreground, 0.6)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.bodySmall !== undefined ? Style.font.bodySmall : Style.font.body
+        renderType: Text.NativeRendering
       }
     }
   }

@@ -127,7 +127,7 @@ mkdir -p "$scfg/omarchy"
 echo '{"bar":{"layout":{"left":[{"id":"swordfish.workspaces","order":"[1,2]"}],"center":[],"right":[]}}}' >"$scfg/omarchy/shell.json"
 chmod 600 "$scfg/omarchy/shell.json"
 ws_settings() { XDG_CONFIG_HOME=$scfg XDG_STATE_HOME=$tmp/state "$src/ws-settings" "$@"; }
-echo '{"rooms":[{"name":"A","apps":[]}],"profiles":"[{\"name\":\"P\",\"rooms\":[]}]","wrapSwipe":"yes","evil":1,"transitionDuration":600}' >"$tmp/imp.json"
+echo '{"rooms":[{"name":"A","apps":[]}],"profiles":"[{\"name\":\"P\",\"rooms\":[]}]","wrapSwipe":"yes","evil":1,"transitionDuration":600,"overflow":"shrink","stackAfter":"2"}' >"$tmp/imp.json"
 ws_settings import "$tmp/imp.json" >/dev/null
 e=$(jq -c '.bar.layout.left[0]' "$scfg/omarchy/shell.json")
 eq "import: rooms stored as text"   "$(jq -r '.rooms | type' <<<"$e")" string
@@ -135,6 +135,8 @@ eq "import: profiles kept"          "$(jq -r '.profiles | fromjson | .[0].name' 
 eq "import: wrong type dropped"     "$(jq -r 'has("wrapSwipe")' <<<"$e")" false
 eq "import: unknown key dropped"    "$(jq -r 'has("evil")' <<<"$e")" false
 eq "import: number kept"            "$(jq -r '.transitionDuration' <<<"$e")" 600
+eq "import: overflow kept"          "$(jq -r '.overflow' <<<"$e")" shrink
+eq "import: stackAfter as text dropped" "$(jq -r 'has("stackAfter")' <<<"$e")" false
 eq "import: other keys kept"        "$(jq -r '.order' <<<"$e")" "[1,2]"
 eq "import: shell.json still 600"   "$(stat -c %a "$scfg/omarchy/shell.json")" 600
 echo '{"hidden":"[3]"}' | ws_settings apply

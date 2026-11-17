@@ -16,11 +16,17 @@
 
 ![Screenshot 6](screenshots/screenshot-6.png)
 
+![Overflow stack: the cards that don't fit, fanned out from the stack chip](screenshots/screenshot-7.png)
+
+![Every card in one container, the chip showing the active workspace](screenshots/screenshot-8.png)
+
+![Stack settings](screenshots/screenshot-9.png)
+
 A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style workspace
 cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
 the order you see on the bar.
 
-Version 1.18.0 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
+Version 1.19.0 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
 
 **Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
 Hyprland versions may work; the widget warns in Settings when yours differs from the
@@ -42,7 +48,7 @@ Or from a release zip / folder:
    (the folder name and the `id` in `manifest.json` must both be `swordfish.workspaces`).
 2. Check the download and make the scripts executable:
    ```bash
-   sha256sum -c swordfish-hud-workspaces-v1.18.0.zip.sha256   # next to the zip
+   sha256sum -c swordfish-hud-workspaces-v1.19.0.zip.sha256   # next to the zip
    chmod +x ~/.config/omarchy/plugins/swordfish.workspaces/ws-*
    ```
 3. Put the widget on the bar in place of the stock workspaces widget:
@@ -69,6 +75,7 @@ Or from a release zip / folder:
 | **Hover** a card | Room preview: the windows on that workspace (click one to focus it). |
 | **Scroll** over the bar | Step through the cards in bar order. Wraps around by default. |
 | **3-finger swipe** | Step through the cards in bar order (after the setup below). |
+| **Click the stack chip** | Fan out the cards that don't fit on the bar (see [below](#many-cards-the-overflow-stack)). |
 | **Click +** | Open the next free workspace (brings back a deleted one first). |
 | **Right-click +** | Open the panel: **Settings**, **Rooms**, **How to use** and **About** tabs. |
 | **Super+1…0** | Go to the 1st…10th card on the bar (after the setup below). |
@@ -98,13 +105,58 @@ Or from a release zip / folder:
 
 On a vertical bar, cards stay compact and show the emoji, icon or number only.
 
-### Many cards: they never cover the rest of the bar
+### Many cards: the overflow stack
 
-The cards only use the space up to the next thing on the bar (the clock, or whatever
-comes after this widget). When they don't fit, named cards shorten their names
-("Vibe-V…"); if that still isn't enough, every card becomes a compact chip with just its
-emoji, icon or number. Hover a card for its full name. As soon as there's room again
-(fewer cards, shorter names), they grow back.
+![The stack chip fanned out](screenshots/screenshot-7.png)
+
+The cards only use the space up to the next thing on the bar (the clock, the indicators,
+or whatever comes after this widget), so they never cover it. When they don't all fit,
+named cards first shorten their names a little ("Claude-D…"; hover a card for its full
+name). If that isn't enough, the cards that fit stay on the bar and the rest wait in the
+**stack chip**: a little deck with a count, just before **+**.
+
+| Action | What it does |
+|---|---|
+| **Click the stack chip** | Fan the stacked cards out below it. Click anywhere else to close it. |
+| **Click** a stacked card | Go to that workspace. |
+| **Right-click** a stacked card | Open the card editor for it. |
+| **↑** next to a stacked card | Move it to the front of the bar. |
+| **Drag a card onto the stack chip** | Put it in the stack (it goes to the end of the order). |
+| **Scroll** over the stack chip | Step through the cards, like anywhere else on the bar. |
+
+Good to know:
+
+- While the workspace you're on is in the stack, the chip wears that card's colour and
+  emoji or icon, so the active workspace always shows.
+- Stacked cards keep their place in the order: scroll, swipe and Super+number still step
+  through every card, stacked or not.
+- As soon as there's room again (fewer cards, shorter names), cards come back out of the
+  stack on their own.
+- The layout holds still under the pointer. Omarchy's bar reveals its hidden indicators
+  while you hover it, which takes room next to the cards; the widget learns how much the
+  first time that happens (kept in the `fitReserve` setting) and always leaves that room
+  free, so cards don't jump in and out of the stack, or cover the indicators, as you move
+  the pointer over the bar.
+- A vertical bar has no stack: its cards are compact already.
+
+#### One container for every card
+
+![Every card in the container](screenshots/screenshot-8.png)
+
+If you'd rather keep the bar short, pick a number under **Stack every card once there are
+more than** (Settings → Appearance). With more cards than that, all of them go into the
+stack and the chip becomes a container: it shows the active workspace's emoji or icon,
+name and colour, and how many workspaces there are. Click it for the full list; **↑**
+there moves a workspace to the top of the list. With that many cards or fewer, they sit
+on the bar as usual. **Off** (the default) only stacks what doesn't fit.
+
+#### Prefer every card on the bar?
+
+Turn off **Stack cards that don't fit** (Settings → Appearance). Names then shorten
+further and, if needed, every card becomes a compact chip with just its emoji, icon or
+number, as in 1.18.
+
+![Stack settings](screenshots/screenshot-9.png)
 
 ### Closing a workspace (editor → Close…)
 
@@ -362,6 +414,8 @@ be set from a terminal, e.g. `omarchy bar set swordfish.workspaces transition sl
 | `wrapScroll` | `true` / `false` | `true` |
 | `keysFollowBar` | `true` / `false`: Super+number by bar position | `true` |
 | `activeStyle` | `solid` / `outline` | `solid` |
+| `overflow` | `stack` / `shrink`: what happens to cards that don't fit | `stack` |
+| `stackAfter` | 0–10: with more cards than this, every card goes into the stack (`0` = off) | `0` |
 | `resetOnBoot` | `true` / `false`: default cards after each reboot | `true` |
 | `rooms` | saved rooms (JSON list), see [Rooms](#rooms) | `[]` |
 | `profiles` | saved decks (JSON list of `{name, rooms}`), see [Profiles](#profiles) | `[]` |
@@ -369,6 +423,7 @@ be set from a terminal, e.g. `omarchy bar set swordfish.workspaces transition sl
 | `recentEmoji` | recently used emoji (JSON list, newest first) | `[]` |
 | `recentColors` | recently used custom colours (JSON list) | `[]` |
 | `lastBoot` | internal: the boot the widget last saw | |
+| `fitReserve` | internal: room (px) kept free for the bar's hover-revealed indicators | |
 
 Numbers and booleans need `--json`, e.g. `omarchy bar set swordfish.workspaces transitionDuration 600 --json`.
 
@@ -507,6 +562,18 @@ the MIT licence; keep it with this plugin, or remove it from your own fork.
 
 ## Changelog
 
+- **1.19.0**: **Overflow stack.** When the cards don't all fit, the ones that fit stay on
+  the bar and the rest go into a stack chip before **+**; click it to fan them out (click
+  a card to go there, right-click to edit it, **↑** moves it to the front of the bar, drag
+  a card onto the chip to stack it). The chip takes the active card's colour and emoji
+  while that workspace is inside. **One container:** new **Stack every card once there are
+  more than** (Off, 1–6) puts all the cards into the chip, which then shows the active
+  workspace's name. **Stable under the pointer:** the bar reveals hidden indicators on
+  hover, which used to make the cards re-fit (and cover the indicators for a moment) every
+  time the pointer crossed the bar; the widget now always leaves that room free and
+  re-measures every 0.4 s instead of every 2 s. **Stack cards that don't fit** (Settings →
+  Appearance) switches back to the compact chips of 1.18. New settings `overflow`,
+  `stackAfter`; internal `fitReserve`.
 - **1.18.0**: The cards never cover the rest of the bar: with many cards they shorten their
   names, then shrink to compact chips (emoji, icon or number), so the clock and the centre
   of the bar stay visible. New **Close…** in the card editor closes a workspace's apps but

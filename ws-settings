@@ -44,7 +44,7 @@ known='{
   "recentEmoji": "json", "recentColors": "json",
   "transition": "string", "transitionCurve": "string", "transitionDuration": "number",
   "transitionDistance": "number", "swipeNatural": "boolean", "wrapSwipe": "boolean",
-  "wrapScroll": "boolean", "keysFollowBar": "boolean", "activeStyle": "string",
+  "wrapScroll": "boolean", "keysFollowBar": "boolean", "activeStyle": "string", "overflow": "string", "stackAfter": "number",
   "resetOnBoot": "boolean", "iconDir": "string"
 }'
 
