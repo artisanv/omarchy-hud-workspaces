@@ -1,26 +1,19 @@
-# HUD Workspaces
+<h1 align="center">HUD Workspaces</h1>
 
-![HUD Workspaces bar](assets/screenshot-bar.png)
+<p align="center">
+  Workspace cards for the <a href="https://omarchy.org/">Omarchy</a> bar that you can name, colour,
+  reorder and stack.
+</p>
 
-## Screenshots
+<p align="center">
+  <a href="https://github.com/artisanv/omarchy-hud-workspaces/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/artisanv/omarchy-hud-workspaces?label=release"></a>
+  <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-green"></a>
+  <img alt="Omarchy 4" src="https://img.shields.io/badge/Omarchy-4-blue">
+</p>
 
-![Screenshot 1](screenshots/screenshot-1.png)
-
-![Screenshot 2](screenshots/screenshot-2.png)
-
-![Screenshot 3](screenshots/screenshot-3.png)
-
-![Screenshot 4](screenshots/screenshot-4.png)
-
-![Screenshot 5](screenshots/screenshot-5.png)
-
-![Screenshot 6](screenshots/screenshot-6.png)
-
-![Overflow stack: the cards that don't fit, fanned out from the stack chip](screenshots/screenshot-7.png)
-
-![Every card in one container, the chip showing the active workspace](screenshots/screenshot-8.png)
-
-![Stack settings](screenshots/screenshot-9.png)
+<p align="center">
+  <img src="screenshots/screenshot-7.png" alt="HUD Workspaces: cards on the bar, with the overflow stack fanned out" width="760">
+</p>
 
 A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style workspace
 cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
@@ -31,6 +24,88 @@ Version 1.19.0 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` an
 **Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
 Hyprland versions may work; the widget warns in Settings when yours differs from the
 tested one, and problems are written to `~/.local/state/hud-workspaces/log`.
+
+## Highlights
+
+- **Cards you can read.** Give each workspace a name, an emoji or your own icon, and a
+  colour. The active card is filled with its colour; cards with windows are marked.
+- **Overflow stack** (new in 1.19). Cards that don't fit wait in a stack chip; one click
+  fans them out. Or keep the bar short and put every card into one container that shows
+  the workspace you're on. [More](#many-cards-the-overflow-stack)
+- **Your order, everywhere.** Drag cards to reorder them. Scroll, 3-finger swipe,
+  Super+number and the slide direction of the transition all follow the order on the bar.
+- **Room preview.** Hover a card to see the windows on that workspace; click one to focus
+  it.
+- **Window drop.** Super+drag a window onto a card to move it there.
+- **Close or delete.** Close a workspace's apps and keep its card, or delete the card and
+  choose where its windows go.
+- **Rooms and profiles.** Save a card with its apps as a [room](#rooms), or the whole bar
+  as a [profile](#profiles), and get them back in one click.
+- **Transitions.** Six styles, six motion curves, speed and distance, with a live preview.
+- **Careful with your data.** Settings are backed up daily, kept private to your user, and
+  never passed on command lines. The widget makes no network requests.
+  [More](#privacy)
+
+## What's new in 1.19
+
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/screenshot-7.png" alt="Overflow stack"></td>
+    <td width="50%"><img src="screenshots/screenshot-8.png" alt="One container for every card"></td>
+  </tr>
+  <tr>
+    <td valign="top"><b>Overflow stack.</b> When the cards don't all fit, the rest go into a stack chip before <b>+</b>. Click it to fan them out; click a card to go there, right-click to edit it, <b>↑</b> moves it to the front, drag a card onto the chip to stack it.</td>
+    <td valign="top"><b>One container.</b> Pick a number in Settings and, with more cards than that, every card goes into the chip, which shows the active workspace's name, colour and the number of workspaces.</td>
+  </tr>
+</table>
+
+- **Stable under the pointer.** Omarchy's bar reveals hidden indicators while you hover
+  it; the cards used to re-fit every time. They now always leave that room free.
+- **Your choice.** Turn off **Stack cards that don't fit** to get the compact chips of
+  1.18 back.
+
+Full list in the [changelog](#changelog) and the
+[release notes](https://github.com/artisanv/omarchy-hud-workspaces/releases/latest).
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center" valign="top" width="33%"><img src="screenshots/screenshot-2.png" alt="Room preview"><br><b>Room preview</b><br>Hover a card to see its windows.</td>
+    <td align="center" valign="top" width="33%"><img src="screenshots/screenshot-3.png" alt="Card editor"><br><b>Card editor</b><br>Name, emoji or your own icon, colour.</td>
+    <td align="center" valign="top" width="33%"><img src="screenshots/screenshot-4.png" alt="Rooms"><br><b>Rooms</b><br>A card and its apps, saved and reopened.</td>
+  </tr>
+  <tr>
+    <td align="center" valign="top"><img src="screenshots/screenshot-7.png" alt="Overflow stack"><br><b>Overflow stack</b><br>Cards that don't fit, one click away.</td>
+    <td align="center" valign="top"><img src="screenshots/screenshot-8.png" alt="One container"><br><b>One container</b><br>Every card behind the active one.</td>
+    <td align="center" valign="top"><img src="screenshots/screenshot-9.png" alt="Stack settings"><br><b>Stack settings</b><br>Stack, shrink, or one container.</td>
+  </tr>
+  <tr>
+    <td align="center" valign="top"><img src="screenshots/screenshot-1.png" alt="Settings"><br><b>Settings</b><br>Transitions, navigation, appearance.</td>
+    <td align="center" valign="top"><img src="screenshots/screenshot-5.png" alt="How to use"><br><b>How to use</b><br>The guide, inside the panel.</td>
+    <td align="center" valign="top"><img src="screenshots/screenshot-6.png" alt="About"><br><b>About</b><br>Answers to common questions.</td>
+  </tr>
+</table>
+
+The bar with named cards:
+
+![HUD Workspaces bar](assets/screenshot-bar.png)
+
+## Contents
+
+- [Install](#install)
+- [Using it](#using-it): [card editor](#card-editor-double-click-a-card) ·
+  [overflow stack](#many-cards-the-overflow-stack) ·
+  [closing](#closing-a-workspace-editor--close) · [custom icons](#custom-icons) ·
+  [deleting](#deleting-a-workspace-editor--delete)
+- [Rooms](#rooms) · [Profiles](#profiles) ·
+  [Transition settings](#transition-settings-right-click-)
+- [Hyprland integration](#hyprland-integration)
+- [Settings reference](#settings-reference) · [Backup and restore](#backup-and-restore) ·
+  [Privacy](#privacy)
+- [`ws-step`](#ws-step) · [`ws-room`](#ws-room)
+- [Troubleshooting](#troubleshooting) · [Uninstall](#uninstall) · [About](#about) ·
+  [Changelog](#changelog)
 
 ---
 
