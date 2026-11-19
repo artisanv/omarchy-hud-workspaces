@@ -19,7 +19,7 @@ A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style 
 cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
 the order you see on the bar.
 
-Version 1.19.0 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
+Version 1.19.1 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
 
 **Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
 Hyprland versions may work; the widget warns in Settings when yours differs from the
@@ -123,7 +123,7 @@ Or from a release zip / folder:
    (the folder name and the `id` in `manifest.json` must both be `swordfish.workspaces`).
 2. Check the download and make the scripts executable:
    ```bash
-   sha256sum -c swordfish-hud-workspaces-v1.19.0.zip.sha256   # next to the zip
+   sha256sum -c swordfish-hud-workspaces-v1.19.1.zip.sha256   # next to the zip
    chmod +x ~/.config/omarchy/plugins/swordfish.workspaces/ws-*
    ```
 3. Put the widget on the bar in place of the stock workspaces widget:
@@ -637,6 +637,9 @@ the MIT licence; keep it with this plugin, or remove it from your own fork.
 
 ## Changelog
 
+- **1.19.1**: When every card is in the stack chip and the active workspace has no name
+  or emoji, the chip now reads **Workspace N** instead of a bare number, so it no longer
+  looks like "9 9" next to the card count.
 - **1.19.0**: **Overflow stack.** When the cards don't all fit, the ones that fit stay on
   the bar and the rest go into a stack chip before **+**; click it to fan them out (click
   a card to go there, right-click to edit it, **↑** moves it to the front of the bar, drag

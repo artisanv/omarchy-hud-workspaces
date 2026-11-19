@@ -3166,7 +3166,7 @@ BarWidget {
   readonly property string stackLabel: {
     var id = root.stackActiveId
     if (!root.stackAll || id < 0) return ""
-    return root.customName(id) !== "" ? root.customName(id) : (root.hasMark(id) ? "" : root.numberLabel(id))
+    return root.customName(id) !== "" ? root.customName(id) : (root.hasMark(id) ? "" : "Workspace " + root.numberLabel(id))
   }
   readonly property real stackGap: Style.space(4)
   readonly property real stackCountW: Math.ceil(labelMetrics.advanceWidth(String(root.stackIds.length)))
