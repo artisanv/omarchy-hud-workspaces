@@ -219,6 +219,13 @@ PY
 )
   eq "$f: every Text is plain text" "$missing" ""
 done
+# Omarchy plugin motion rules: every duration through Style.duration (so
+# `omarchy toggle animations` turns it off), ease-out only, no bounce or
+# overshoot. A PauseAnimation is a hold, not motion.
+for f in Workspaces.qml DropIndicator.qml; do
+  eq "$f: durations via Style.duration" "$(grep -n 'duration:' "$src/$f" | grep -v 'Style.duration' | grep -v PauseAnimation)" ""
+  eq "$f: ease-out curves only" "$(grep -noE 'Easing\.(In[A-Za-z]*|OutBack|OutElastic|OutBounce|OutInBack|Linear)' "$src/$f")" ""
+done
 eq "check: reads stdin"             "$(echo '[{"argv":["ls","-la"]}]' | "$src/ws-room" check -)" "ls -la"
 
 echo

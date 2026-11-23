@@ -19,7 +19,7 @@ A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style 
 cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
 the order you see on the bar.
 
-Version 1.20.0 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
+Version 1.20.1 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
 
 **Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
 Hyprland versions may work; the widget warns in Settings when yours differs from the
@@ -141,7 +141,7 @@ Or from a release zip / folder:
    (the folder name and the `id` in `manifest.json` must both be `swordfish.workspaces`).
 2. Check the download and make the scripts executable:
    ```bash
-   sha256sum -c swordfish-hud-workspaces-v1.20.0.zip.sha256   # next to the zip
+   sha256sum -c swordfish-hud-workspaces-v1.20.1.zip.sha256   # next to the zip
    chmod +x ~/.config/omarchy/plugins/swordfish.workspaces/ws-*
    ```
 3. Put the widget on the bar in place of the stock workspaces widget:
@@ -670,6 +670,11 @@ the MIT licence; keep it with this plugin, or remove it from your own fork.
 
 ## Changelog
 
+- **1.20.1**: Every animation now follows the Omarchy plugin motion rules: durations go
+  through `Style.duration`, so **`omarchy toggle animations`** turns them all off;
+  ease-out curves only (no overshoot or ease-in); nothing grows from far below its size
+  (the lifted card and the drop confirmation start at 0.96–0.97); exits are shorter than
+  entrances and everything stays under 300 ms. A test enforces it.
 - **1.20.0**: **Arrange the stack by hand:** in the fanned-out stack (and the one-container
   list) press a card and drag it up or down; the other cards step aside and the order is
   saved on release, the same `order` the bar uses. Click still goes there, right-click

@@ -2563,7 +2563,7 @@ BarWidget {
   property int dropIndex: -1
 
   Behavior on ghostTilt {
-    NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+    NumberAnimation { duration: Style.duration(90); easing.type: Easing.OutCubic }
   }
 
   Connections {
@@ -5314,15 +5314,21 @@ BarWidget {
     z: 10
     opacity: root.dragId >= 0 ? 1 : 0
     visible: opacity > 0.02
-    scale: root.dragId >= 0 ? 1.15 : 0.55
+    // Lifted from just under card size (never from nothing), and put down
+    // a little faster than it was picked up.
+    scale: root.dragId >= 0 ? 1.15 : 0.97
     rotation: root.ghostTilt
 
     Behavior on opacity {
-      NumberAnimation { duration: 120 }
+      NumberAnimation { duration: Style.duration(root.dragId >= 0 ? 180 : 120); easing.type: Easing.OutCubic }
     }
 
     Behavior on scale {
-      NumberAnimation { duration: 160; easing.type: Easing.OutBack }
+      NumberAnimation {
+        duration: Style.duration(root.dragId >= 0 ? 180 : 120)
+        easing.type: Easing.Bezier
+        easing.bezierCurve: Style.easeOut
+      }
     }
 
     // Same chamfered panel geometry as the chips, held afloat by an offset
@@ -5404,21 +5410,21 @@ BarWidget {
             x: root.vertical ? 0 : root.chipShift(button.modelData)
             y: root.vertical ? root.chipShift(button.modelData) : 0
             Behavior on x {
-              NumberAnimation { duration: 170; easing.type: Easing.OutCubic }
+              NumberAnimation { duration: Style.duration(170); easing.type: Easing.OutCubic }
             }
             Behavior on y {
-              NumberAnimation { duration: 170; easing.type: Easing.OutCubic }
+              NumberAnimation { duration: Style.duration(170); easing.type: Easing.OutCubic }
             }
           },
           Translate {
             id: settle
             Behavior on x {
               id: settleBx
-              NumberAnimation { duration: 300; easing.type: Easing.OutCubic }
+              NumberAnimation { duration: Style.duration(240); easing.type: Easing.OutCubic }
             }
             Behavior on y {
               id: settleBy
-              NumberAnimation { duration: 300; easing.type: Easing.OutCubic }
+              NumberAnimation { duration: Style.duration(240); easing.type: Easing.OutCubic }
             }
           }
         ]
@@ -5474,49 +5480,41 @@ BarWidget {
             property: "rotation"
             from: 0
             to: -6
-            duration: 55
-            easing.type: Easing.InOutSine
+            duration: Style.duration(55)
+            easing.type: Easing.OutCubic
           }
           PropertyAnimation {
             target: button
             property: "rotation"
             to: 6
-            duration: 55
-            easing.type: Easing.InOutSine
+            duration: Style.duration(55)
+            easing.type: Easing.OutCubic
           }
           PropertyAnimation {
             target: button
             property: "rotation"
             to: -4
-            duration: 50
-            easing.type: Easing.InOutSine
+            duration: Style.duration(50)
+            easing.type: Easing.OutCubic
           }
           PropertyAnimation {
             target: button
             property: "rotation"
             to: 0
-            duration: 50
-            easing.type: Easing.InOutSine
+            duration: Style.duration(50)
+            easing.type: Easing.OutCubic
           }
         }
 
-        SequentialAnimation {
+        PropertyAnimation {
           id: pop
-          PropertyAnimation {
-            target: ring
-            property: "scale"
-            from: 0.75
-            to: 1.08
-            duration: 110
-            easing.type: Easing.OutQuad
-          }
-          PropertyAnimation {
-            target: ring
-            property: "scale"
-            to: 1
-            duration: 150
-            easing.type: Easing.InOutSine
-          }
+          target: ring
+          property: "scale"
+          from: 0.95
+          to: 1
+          duration: Style.duration(180)
+          easing.type: Easing.Bezier
+          easing.bezierCurve: Style.easeOut
         }
 
         onTooltipHoveredChanged: {
@@ -5658,7 +5656,7 @@ BarWidget {
           visible: opacity > 0
 
           Behavior on opacity {
-            NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+            NumberAnimation { duration: Style.duration(90); easing.type: Easing.OutCubic }
           }
 
           Rectangle {

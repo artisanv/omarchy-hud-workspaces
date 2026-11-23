@@ -40,30 +40,38 @@ PanelWindow {
     anim.restart()
   }
 
+  // In: fade and settle from just under full size (180 ms, ease-out).
+  // Hold: the time to read it (not motion, so it stays with animations off).
+  // Out: a shorter fade (120 ms).
   SequentialAnimation {
     id: anim
 
-    NumberAnimation {
-      target: card
-      property: "opacity"
-      to: 1
-      duration: 85
-      easing.type: Easing.OutCubic
-    }
-    NumberAnimation {
-      target: card
-      property: "scale"
-      to: 1
-      duration: 140
-      easing.type: Easing.OutBack
+    ParallelAnimation {
+      NumberAnimation {
+        target: card
+        property: "opacity"
+        from: 0
+        to: 1
+        duration: Style.duration(180)
+        easing.type: Easing.OutCubic
+      }
+      NumberAnimation {
+        target: card
+        property: "scale"
+        from: 0.96
+        to: 1
+        duration: Style.duration(180)
+        easing.type: Easing.Bezier
+        easing.bezierCurve: Style.easeOut
+      }
     }
     PauseAnimation { duration: root.holdMs }
     NumberAnimation {
       target: card
       property: "opacity"
       to: 0
-      duration: 210
-      easing.type: Easing.InCubic
+      duration: Style.duration(120)
+      easing.type: Easing.OutCubic
     }
 
     onStopped: {
@@ -93,7 +101,7 @@ PanelWindow {
 
         // Start hidden; the animation is what brings it up.
         opacity: 0
-        scale: 0.86
+        scale: 0.96
 
         Column {
           id: box
