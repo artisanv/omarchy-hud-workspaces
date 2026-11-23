@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests for HUD Workspaces: syntax/lint, ws-step order logic (mirrors
 # computeWorkspaceIds() in Workspaces.qml), ws-room room validation,
-# ws-setup install/remove on a copy of a Hyprland config, ws-settings
-# import validation. Nothing here touches the real config or Hyprland.
+# ws-setup install/remove/drop on a copy of a Hyprland config, ws-room
+# capture against a stubbed hyprctl, ws-settings import validation. Nothing here touches the real config or Hyprland.
 #
 #   tests/run.sh            run everything; exit 1 on any failure
 
@@ -116,6 +116,47 @@ eq "legacy detected"              "$(st .legacy)" true
 setup install --quiet
 eq "legacy migrated"              "$(st .legacy)/$(st .ok)" false/true
 eq "rest of bindings.lua kept"    "$(cat "$cfg/hypr/bindings.lua")" "-- my binds"
+# Window drop on its own: rewrites only the generated file, never installs.
+cp "$cfg/hypr/hyprland.lua" "$tmp/main-before.lua"
+cp "$cfg/hypr/input.lua" "$tmp/input-before.lua"
+setup drop off --quiet
+eq "drop off alone"               "$(st .drop)/$(st .ok)" false/true
+eq "drop choice remembered"       "$(jq -r .drop "$cfg/omarchy/hud-workspaces/setup.json")" false
+diff -q "$tmp/main-before.lua" "$cfg/hypr/hyprland.lua" >/dev/null && diff -q "$tmp/input-before.lua" "$cfg/hypr/input.lua" >/dev/null &&
+  ok "drop: only the generated file changes" || bad "drop: only the generated file changes"
+setup drop on --quiet
+eq "drop on alone"                "$(st .drop)" true
+setup remove --quiet
+setup drop off --quiet 2>/dev/null
+eq "drop refuses when not installed" "$?/$(st .installed)" 3/false
+[[ -e $cfg/hypr/hud_workspaces.lua ]] && bad "drop installs nothing" || ok "drop installs nothing"
+diff -q "$tmp/orig/hyprland.lua" "$cfg/hypr/hyprland.lua" >/dev/null && ok "drop: hyprland.lua as before" ||
+  bad "drop: hyprland.lua as before" "$(diff "$tmp/orig/hyprland.lua" "$cfg/hypr/hyprland.lua")"
+# The widget's toggle uses that, and only Install installs.
+toggle=$(awk '/label: "Window drop"/,/^      }$/' "$src/Workspaces.qml")
+grep -q '"install"' <<<"$toggle" && bad "widget: window drop toggle never installs" || ok "widget: window drop toggle never installs"
+
+echo "ws-room capture (stubbed Hyprland)"
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/hyprctl" <<'STUB'
+#!/usr/bin/env bash
+[[ ${HUD_STUB_FAIL:-} == 1 ]] && exit 1
+[[ ${HUD_STUB_FAIL:-} == junk ]] && { echo 'not json'; exit 0; }
+[[ $1 == clients ]] && echo '[]'
+exit 0
+STUB
+printf '#!/bin/sh\nexit 1\n' >"$tmp/bin/gdbus"
+chmod +x "$tmp/bin/hyprctl" "$tmp/bin/gdbus"
+cap() { PATH=$tmp/bin:$PATH "$src/ws-room" capture-deck "$@"; }
+out=$(cap 3 4); eq "capture-deck: empty workspaces" "$?:$out" '0:{"3":[],"4":[]}'
+out=$(HUD_STUB_FAIL=1 cap 3 4); eq "capture-deck: Hyprland unreachable fails" "$?:$out" "1:"
+out=$(HUD_STUB_FAIL=junk cap 3); eq "capture-deck: bad window list fails" "$?:$out" "1:"
+out=$(cap 3 x); eq "capture-deck: bad id fails" "$?:$out" "1:"
+# A failed capture must never be saved as "no apps".
+grep -q 'finishProfileSave(String(profileCaptureOut.text), code)' "$src/Workspaces.qml" &&
+  grep -q 'finishRoomSave(String(roomCaptureOut.text), code)' "$src/Workspaces.qml" &&
+  ! grep -q 'onStreamFinished: root.finish\(Profile\|Room\)Save' "$src/Workspaces.qml" &&
+  ok "widget: captures checked before saving" || bad "widget: captures checked before saving"
 
 echo "ws-settings import validation"
 eq "rejects a non-object" "$("$src/ws-settings" import <(echo '[1]') 2>&1 | head -c 30)" "Not a HUD Workspaces settings "

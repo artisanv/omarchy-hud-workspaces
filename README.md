@@ -19,7 +19,7 @@ A workspace bar widget for the [Omarchy](https://omarchy.org/) shell: HUD-style 
 cards you can reorder, name, colour and decorate with emoji or your own icons, with transitions that follow
 the order you see on the bar.
 
-Version 1.19.1 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
+Version 1.20.0 · requires Omarchy 4 (Hyprland Lua config) · `jq`, `hyprctl` and `python3` on `PATH`.
 
 **Tested with:** Omarchy 4.0.0 alpha · Hyprland 0.56.2 · Quickshell 0.3 · Qt 6.11. Other
 Hyprland versions may work; the widget warns in Settings when yours differs from the
@@ -29,9 +29,10 @@ tested one, and problems are written to `~/.local/state/hud-workspaces/log`.
 
 - **Cards you can read.** Give each workspace a name, an emoji or your own icon, and a
   colour. The active card is filled with its colour; cards with windows are marked.
-- **Overflow stack** (new in 1.19). Cards that don't fit wait in a stack chip; one click
-  fans them out. Or keep the bar short and put every card into one container that shows
-  the workspace you're on. [More](#many-cards-the-overflow-stack)
+- **Overflow stack.** Cards that don't fit wait in a stack chip; one click fans them out,
+  and you drag them up or down to put them in your order (new in 1.20). Or keep the bar
+  short and put every card into one container that shows the workspace you're on.
+  [More](#many-cards-the-overflow-stack)
 - **Your order, everywhere.** Drag cards to reorder them. Scroll, 3-finger swipe,
   Super+number and the slide direction of the transition all follow the order on the bar.
 - **Room preview.** Hover a card to see the windows on that workspace; click one to focus
@@ -46,7 +47,24 @@ tested one, and problems are written to `~/.local/state/hud-workspaces/log`.
   never passed on command lines. The widget makes no network requests.
   [More](#privacy)
 
-## What's new in 1.19
+## What's new in 1.20
+
+- **Arrange the stack by hand.** In the fanned-out stack, press a card and drag it up or
+  down: the others step aside, and it stays where you drop it. A plain click still takes
+  you there. [More](#many-cards-the-overflow-stack)
+- **Safer saves.** If the open apps can't be read, a room or profile is not saved at all
+  (an existing one of the same name is left as it was) instead of being saved with no
+  apps. The profile button says **Update** when the name is taken.
+- **Profiles bring back the right folders.** Reopening a profile onto cards that are
+  already on the bar counts a terminal or file manager as open only when one is open in
+  the folder it was saved in.
+- **Delete waits for the move.** **Move & delete** removes the card only once its windows
+  have actually moved; if one doesn't, the card is kept and the editor says so.
+- **Window drop switch.** Before the Hyprland integration is installed, the switch only
+  picks what **Install** will set up; once installed it changes window drop alone
+  (`ws-setup drop on|off`), nothing else.
+
+### In 1.19
 
 <table>
   <tr>
@@ -123,7 +141,7 @@ Or from a release zip / folder:
    (the folder name and the `id` in `manifest.json` must both be `swordfish.workspaces`).
 2. Check the download and make the scripts executable:
    ```bash
-   sha256sum -c swordfish-hud-workspaces-v1.19.1.zip.sha256   # next to the zip
+   sha256sum -c swordfish-hud-workspaces-v1.20.0.zip.sha256   # next to the zip
    chmod +x ~/.config/omarchy/plugins/swordfish.workspaces/ws-*
    ```
 3. Put the widget on the bar in place of the stock workspaces widget:
@@ -195,6 +213,7 @@ name). If that isn't enough, the cards that fit stay on the bar and the rest wai
 | **Click the stack chip** | Fan the stacked cards out below it. Click anywhere else to close it. |
 | **Click** a stacked card | Go to that workspace. |
 | **Right-click** a stacked card | Open the card editor for it. |
+| **Drag** a stacked card up or down | Put it somewhere else in the stack. The other cards step aside while you drag; the order is saved when you let go. |
 | **↑** next to a stacked card | Move it to the front of the bar. |
 | **Drag a card onto the stack chip** | Put it in the stack (it goes to the end of the order). |
 | **Scroll** over the stack chip | Step through the cards, like anywhere else on the bar. |
@@ -221,8 +240,8 @@ Good to know:
 If you'd rather keep the bar short, pick a number under **Stack every card once there are
 more than** (Settings → Appearance). With more cards than that, all of them go into the
 stack and the chip becomes a container: it shows the active workspace's emoji or icon,
-name and colour, and how many workspaces there are. Click it for the full list; **↑**
-there moves a workspace to the top of the list. With that many cards or fewer, they sit
+name and colour, and how many workspaces there are. Click it for the full list; drag a
+workspace up or down there to arrange the list by hand, or **↑** to move it to the top. With that many cards or fewer, they sit
 on the bar as usual. **Off** (the default) only stacks what doesn't fit.
 
 #### Prefer every card on the bar?
@@ -288,7 +307,10 @@ card fall back to its name or number. Use another folder with the `iconDir` sett
 - **Workspace with windows**: each window is listed with a destination menu: any other
   card, or **＋ New workspace**. With several windows, **Move all to** sets them all at
   once. Then:
-  - **Move & delete** moves the windows (without pulling you along) and removes the card.
+  - **Move & delete** moves the windows (without pulling you along) and removes the card
+    once they've left. If a window doesn't move within a few seconds, the card is kept,
+    with its name, emoji and colour, and the editor lists what's still there:
+    **Try again**, or close those windows.
   - **Close apps & delete** closes the apps the polite way (like Super+W), after a
     second **Yes, close them** confirmation. Apps with unsaved work may ask to save
     first. The card is removed as soon as the last app is gone, even if the editor
@@ -309,7 +331,8 @@ A room is a card (name, emoji, colour) plus the apps that were open on it, so yo
 rebuild a workspace in one click, for example after the fresh start on reboot.
 
 - **Save**: double-click a card → **Save as room**. Saving again under the same name
-  updates the room.
+  updates the room. If the open apps can't be read (Hyprland not answering), nothing is
+  saved and a room of that name is left as it was.
 - **Open**: right-click **+** → **Rooms** → **Open**. The room gets the next free workspace,
   its card appears at the end of the bar, you switch to it and its apps start there.
 - **Delete**: **✕** next to the room.
@@ -339,13 +362,18 @@ colour and apps, saved as one thing. Opening it gives you exactly that bar back.
 
 - **Save**: right-click **+** → **Profiles**. Pick the cards to include (cards with apps or
   a label start picked; click a card to toggle it), type a name and press **Save**. Saving
-  again under the same name updates the profile.
+  again under the same name updates the profile (the button then says **Update**). If the
+  open apps can't be read, nothing is saved and the existing profile stays as it was.
 - **Open**: **Open** next to the profile. Its cards take the bar, in the saved order, and
   their apps start on them; you land on the first one. Empty cards that aren't in the
   profile are removed. If other cards still have apps open, you're asked first:
   - **Close apps**: those apps are asked to close (as with Super+W; unsaved work prompts
     as usual) and each card goes once its last window is gone.
   - **Keep them**: those cards stay, after the profile's cards.
+
+  When one of the profile's cards is already on the bar, only its missing apps start. A
+  terminal or file manager counts as already open only when one is open in the folder it
+  was saved in, so a terminal somewhere else doesn't stop the saved one from coming back.
 - **One at a time, never twice**: the profile on the bar is marked **● Active**. While all
   its cards are on the bar its button says **On** and is locked, so it can't be opened a
   second time. Its cards stay its own even if you rename or recolour them. If you delete
@@ -428,7 +456,10 @@ Three things need Hyprland's side, not just the bar:
   completes, with your chosen transition.
 - **Window drop** (optional): Super+drag a window onto a card to move it there. Only real
   window drags count: dragging a tab, text or a file inside a window up to the bar does
-  nothing.
+  nothing. The **Window drop** switch in Settings changes nothing on its own until the
+  integration is installed: it picks whether **Install** includes window drop. Once
+  installed, it turns window drop on or off by rewriting only the generated file
+  (`ws-setup drop on|off`).
 
 **Install** it from right-click **+** → **Settings** → **Hyprland integration**, or from a
 terminal:
@@ -436,6 +467,7 @@ terminal:
 ```bash
 ~/.config/omarchy/plugins/swordfish.workspaces/ws-setup install            # all three
 ~/.config/omarchy/plugins/swordfish.workspaces/ws-setup install --no-drop  # without window drop
+~/.config/omarchy/plugins/swordfish.workspaces/ws-setup drop off           # window drop off (installed only)
 ~/.config/omarchy/plugins/swordfish.workspaces/ws-setup status             # what's set up (JSON)
 ~/.config/omarchy/plugins/swordfish.workspaces/ws-setup remove             # stock behaviour back
 ```
@@ -577,6 +609,7 @@ Captures and reopens rooms; the widget calls it, but it works from a terminal to
 ws-room capture <workspace>          print the apps on a workspace as JSON
 ws-room launch <workspace> [-]       switch there and start the apps given on stdin
 ws-room capture-deck <ws>...         capture several workspaces: {"<ws>": [apps]}
+                                     (all or nothing: exits 1 with no output if any fails)
 ws-room launch-deck [-]              open several rooms at once, from stdin: [{"ws": 3, "apps": [...]}]
 ws-room check [-]                    show what each app would be started with (runs nothing)
 ```
@@ -637,6 +670,19 @@ the MIT licence; keep it with this plugin, or remove it from your own fork.
 
 ## Changelog
 
+- **1.20.0**: **Arrange the stack by hand:** in the fanned-out stack (and the one-container
+  list) press a card and drag it up or down; the other cards step aside and the order is
+  saved on release, the same `order` the bar uses. Click still goes there, right-click
+  still edits. Review fixes from the marketplace: the **Window drop** switch never runs
+  the installer (new `ws-setup drop on|off` changes only the generated file of an
+  installed integration; before that the switch just picks what **Install** sets up).
+  Room and profile saves check that the apps were read (`ws-room capture` and
+  `capture-deck` now fail when Hyprland's window list can't be read, and `capture-deck`
+  is all or nothing), so a failed read never replaces a saved room or profile with an
+  empty one; the profile button says **Update** when the name is taken. **Move & delete**
+  keeps the card until its windows have really moved (new editor states for moving and
+  a failed move, with **Try again**). Reopening a profile onto cards already on the bar
+  reads what's open there first and compares folders for terminals and file managers.
 - **1.19.1**: When every card is in the stack chip and the active workspace has no name
   or emoji, the chip now reads **Workspace N** instead of a bare number, so it no longer
   looks like "9 9" next to the card count.

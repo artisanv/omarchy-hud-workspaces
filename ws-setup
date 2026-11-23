@@ -6,6 +6,10 @@
 #       (unless --no-drop) window drop onto cards. --auto-reapply also adds
 #       an Omarchy post-update hook that runs `reapply` after each update
 #       (opt-in: it edits your Hyprland config without asking)
+#   ws-setup drop on|off
+#                       turn window drop on or off in an integration that is
+#                       already installed: rewrites only the generated file
+#                       (backed up first); refuses if nothing is installed
 #   ws-setup remove     put stock Omarchy keys and swipe back
 #   ws-setup status     one JSON line describing what's set up (the widget
 #                       shows this in Settings → Integration)
@@ -314,6 +318,30 @@ do_install() {
   say "Backups of the edited files: $state_dir/backups"
 }
 
+# Window drop on/off for an existing install. Touches nothing but the
+# generated file (and the remembered option); never installs.
+do_set_drop() {
+  if ! loader_present || [[ ! -f $gen ]]; then
+    echo "The Hyprland integration isn't installed; nothing changed. Use Install first." >&2
+    exit 3
+  fi
+  local backups=() b tmp
+  b=$(backup "$gen") && [[ -n $b ]] && backups+=("$b")
+  generated >"$gen"
+  if ! reload_or_rollback "${backups[@]}"; then exit 1; fi
+  mkdir -p -- "$state_dir"
+  tmp=$(mktemp)
+  if [[ -f $state ]] && jq --argjson drop $([[ $drop == 1 ]] && echo true || echo false) '.drop = $drop' \
+      "$state" >"$tmp" 2>/dev/null; then
+    cat "$tmp" >"$state"
+  else
+    jq -cn --argjson drop $([[ $drop == 1 ]] && echo true || echo false) '{drop: $drop, autoReapply: false}' >"$state"
+  fi
+  rm -f -- "$tmp"
+  log "window drop set (drop=$drop)"
+  say "Window drop $([[ $drop == 1 ]] && echo on || echo off)."
+}
+
 do_remove() {
   local backups=() f b
   for f in "$main" "$input" "$bindings" "$gen"; do
@@ -334,6 +362,14 @@ do_remove() {
 
 case $mode in
   install) do_install ;;
+  drop)
+    case ${1:-} in
+      on) drop=1 ;;
+      off) drop=0 ;;
+      *) echo "usage: ws-setup drop on|off" >&2; exit 2 ;;
+    esac
+    do_set_drop
+    ;;
   remove|uninstall) do_remove ;;
   status) status_json ;;
   reapply)
@@ -346,5 +382,5 @@ case $mode in
     fi
     ;;
   generate) generated ;;
-  *) echo "usage: ws-setup install [--no-drop] | remove | status | reapply" >&2; exit 2 ;;
+  *) echo "usage: ws-setup install [--no-drop] | drop on|off | remove | status | reapply" >&2; exit 2 ;;
 esac

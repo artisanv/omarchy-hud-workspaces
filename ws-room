@@ -158,10 +158,16 @@ folder_title() {
 capture() {
   local rows=() pid class title addr argv cwd folders=() used=() f
   mapfile -t folders < <(nautilus_folders)
-  local wins
-  wins=$(hyprctl clients -j | jq -r --argjson ws "$ws" '
+  # A window list that can't be read is an error, not an empty workspace:
+  # callers must not save "no apps" over a room that has some.
+  local clients wins
+  clients=$(hyprctl clients -j 2>/dev/null) &&
+    jq -e 'type == "array"' <<<"$clients" >/dev/null 2>&1 ||
+    { log "capture $ws: couldn't read the window list from Hyprland"; return 1; }
+  wins=$(jq -r --argjson ws "$ws" '
     [.[] | select(.workspace.id == $ws and .mapped and (.hidden | not))]
-    | sort_by(.at[1], .at[0]) | .[] | [.pid, .class, .title, .address] | @tsv')
+    | sort_by(.at[1], .at[0]) | .[] | [.pid, .class, .title, .address] | @tsv' <<<"$clients") ||
+    { log "capture $ws: unreadable window list"; return 1; }
 
   # Nautilus windows first, so a terminal can pick the folder shown next to it.
   local -A nfolder=()
@@ -226,7 +232,11 @@ capture() {
     fi
     rows+=("{\"class\":$(jstr "$class"),\"title\":$(jstr "${title:0:200}"),\"argv\":$argv,\"cwd\":$(jstr "$cwd")}")
   done <<<"$wins"
-  if (( ${#rows[@]} )); then printf '%s\n' "${rows[@]}" | jq -cs .; else echo '[]'; fi
+  if (( ${#rows[@]} )); then
+    printf '%s\n' "${rows[@]}" | jq -cs . || { log "capture $ws: couldn't build the app list"; return 1; }
+  else
+    echo '[]'
+  fi
 }
 
 # Lua string literal: backslash, quote and line breaks escaped, other
@@ -364,12 +374,16 @@ launch() {
 }
 
 # capture-deck <ws>...: {"<ws>": [apps], ...} for several workspaces.
+# All or nothing: any workspace that can't be read fails the whole call
+# (exit 1, no output), so a profile is never saved with lists missing.
 capture_deck() {
   local id acc='{}' apps
   for id in "$@"; do
-    [[ $id =~ ^[0-9]+$ ]] || continue
-    apps=$(ws=$id; capture)
-    acc=$(printf '%s\n%s\n' "$acc" "${apps:-[]}" | jq -cs --arg k "$id" '.[0] + {($k): .[1]}')
+    [[ $id =~ ^[0-9]+$ ]] || { log "capture-deck: bad workspace '$id'"; exit 1; }
+    apps=$(ws=$id; capture) || exit 1
+    acc=$(printf '%s\n%s\n' "$acc" "$apps" |
+      jq -cs --arg k "$id" 'if (.[1] | type) == "array" then .[0] + {($k): .[1]} else error end') ||
+      { log "capture-deck: bad app list for $id"; exit 1; }
   done
   echo "$acc"
 }

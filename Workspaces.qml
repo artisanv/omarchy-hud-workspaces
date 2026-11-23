@@ -386,6 +386,8 @@ BarWidget {
   property var settingsState: ({})
   property string hyprVersion: ""
   property string integrationNotice: ""
+  // Window drop wanted by the next Install (the toggle, before installing).
+  property bool dropChoice: true
   readonly property string testedHyprland: "0.56"
   readonly property bool hyprUntested: root.hyprVersion !== "" &&
     root.hyprVersion.replace(/^v/, "").split(".").slice(0, 2).join(".") !== root.testedHyprland
@@ -961,7 +963,9 @@ BarWidget {
 
   // ---- Deleting a workspace ----
   // "edit" | "delete" (choose where windows go) | "confirmClose" | "closing"
-  // | "closeFailed" (some apps refused to close, e.g. unsaved work).
+  // | "closeFailed" (some apps refused to close, e.g. unsaved work)
+  // | "moving" (windows sent elsewhere, waiting for the workspace to empty)
+  // | "moveFailed" (a window didn't move: the card was kept).
   property string editMode: "edit"
   property var moveTargets: ({})    // window address -> workspace id, or "new"
   // Workspaces whose apps were told to close: id -> time the close was sent.
@@ -971,6 +975,11 @@ BarWidget {
   // kept open on purpose doesn't make the card vanish much later.
   property var pendingDeletes: ({})
   readonly property int pendingDeleteMs: 3 * 60 * 1000
+  // Deletes waiting on window moves ("Move & delete"): id -> the workspace
+  // to land on. A move is quick, so if windows are still there after
+  // `moveWaitMs` it failed: the delete is called off and the card kept.
+  property var deleteLandings: ({})
+  readonly property int moveWaitMs: 5000
 
   function hexAddress(t) {
     var ipc = t.lastIpcObject || {}
@@ -1086,7 +1095,20 @@ BarWidget {
       root.dispatch("hl.dsp.window.move({ workspace = " + root.luaQuote(String(dest)) + ", window = " +
         root.luaQuote("address:" + address) + ", follow = false })")
     }
-    root.finishDelete(id, landing)
+    if (wins.length === 0) {
+      root.finishDelete(id, landing)
+      return
+    }
+    // The moves are requests to the compositor: the card (and its name,
+    // emoji, colour) only goes once the workspace really is empty. If a
+    // window stays put, the card stays and the editor says so.
+    var pending = JSON.parse(JSON.stringify(root.pendingDeletes))
+    pending[String(id)] = Date.now()
+    root.pendingDeletes = pending
+    var landings = JSON.parse(JSON.stringify(root.deleteLandings))
+    landings[String(id)] = landing
+    root.deleteLandings = landings
+    root.editMode = "moving"
   }
 
   function closeAndDelete() {
@@ -1108,6 +1130,11 @@ BarWidget {
   }
 
   function dropPendingDelete(id) {
+    if (root.deleteLandings[String(id)] !== undefined) {
+      var landings = JSON.parse(JSON.stringify(root.deleteLandings))
+      delete landings[String(id)]
+      root.deleteLandings = landings
+    }
     if (root.pendingDeletes[String(id)] === undefined) return
     var pending = JSON.parse(JSON.stringify(root.pendingDeletes))
     delete pending[String(id)]
@@ -1195,8 +1222,13 @@ BarWidget {
       for (var i = 0; i < keys.length; i++) {
         var id = Number(keys[i])
         var started = root.pendingDeletes[keys[i]]
+        var landing = root.deleteLandings[keys[i]]
         if (root.toplevelsOf(id).length === 0) {
-          root.finishDelete(id, -1)
+          root.finishDelete(id, landing !== undefined ? landing : -1)
+        } else if (landing !== undefined && now - started > root.moveWaitMs) {
+          root.dropPendingDelete(id)
+          root.logLine("delete " + id + ": " + root.toplevelsOf(id).length + " window(s) didn't move, card kept")
+          if (root.editingId === id && root.editMode === "moving") root.editMode = "moveFailed"
         } else if (now - started > root.pendingDeleteMs) {
           root.dropPendingDelete(id)
         } else if (root.editingId === id && root.editMode === "closing" && now - started > 6000) {
@@ -1368,23 +1400,29 @@ BarWidget {
 
   Process {
     id: roomCapture
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.finishRoomSave(String(text))
-    }
+    stdout: StdioCollector { id: roomCaptureOut; waitForEnd: true }
+    onExited: function(code) { root.finishRoomSave(String(roomCaptureOut.text), code) }
   }
 
-  function finishRoomSave(text) {
+  function finishRoomSave(text, code) {
     var room = root.pendingRoom
     root.pendingRoom = null
     if (room === null) return
-    var apps = []
+    var apps = null
     try {
       apps = JSON.parse(text)
     } catch (e) {
-      apps = []
+      apps = null
     }
-    room.apps = Array.isArray(apps) ? apps : []
+    if (code !== 0 || !root.validAppList(apps)) {
+      // A failed read is not "no apps": keep any room of that name as it is.
+      root.logLine("room capture failed (exit " + code + "), nothing saved")
+      root.roomNotice = "Couldn't read the open apps, so \u201c" + room.name + "\u201d wasn't saved. Try again."
+      root.panelTab = "rooms"
+      root.settingsOpen = true
+      return
+    }
+    room.apps = apps
     var list = root.rooms.filter(function(r) {
       return String(r.name).toLowerCase() !== room.name.toLowerCase()
     })
@@ -1612,24 +1650,61 @@ BarWidget {
     return root.profileSlots(p).filter(function(n) { return n > 0 })
   }
 
-  // Apps of a room not already open on workspace `id` (matched by class, one
-  // window per app).
-  function missingApps(room, id) {
-    var have = root.toplevelsOf(id).map(root.windowKeys)
+  // Apps of a room not already open on workspace `id`, one window per app.
+  // `open` is what `ws-room capture-deck` read on that workspace (class,
+  // command and folder of each window), or null if it couldn't be read.
+  // Apps match by class; a terminal or file manager saved in a folder only
+  // counts as open when one is open in that same folder, so a terminal
+  // somewhere else never stops the saved one from coming back. Without
+  // `open`, folders can't be checked: those apps are always started.
+  function missingApps(room, id, open) {
+    var have = open !== null && open !== undefined
+      ? open.map(function(app) { return { keys: root.savedAppKeys(app), folder: root.appFolder(app) } })
+      : root.toplevelsOf(id).map(function(t) { return { keys: root.windowKeys(t), folder: null } })
     var out = []
     var raw = room.apps || []
     for (var i = 0; i < (raw.length || 0); i++) {
       var want = root.savedAppKeys(raw[i])
+      var folder = root.appFolder(raw[i])
       var k = -1
       for (var w = 0; w < have.length && k === -1; w++) {
+        if (folder !== "" && have[w].folder !== folder) continue
         for (var x = 0; x < want.length; x++) {
-          if (have[w].indexOf(want[x]) !== -1) { k = w; break }
+          if (have[w].keys.indexOf(want[x]) !== -1) { k = w; break }
         }
       }
       if (k !== -1) have.splice(k, 1)
       else out.push(raw[i])
     }
     return out
+  }
+
+  // Terminals and file managers: the folder is what they show, so it is
+  // part of what makes a saved one "the same app".
+  readonly property string homeDir: Quickshell.env("HOME") || ""
+  readonly property var folderApps: /^(org\.gnome\.nautilus|nautilus|org\.gnome\.terminal|gnome-terminal|gnome-terminal-server|org\.gnome\.console|kgx|foot|footclient|alacritty|kitty|ghostty|com\.mitchellh\.ghostty|konsole|org\.kde\.konsole|wezterm|org\.wezfurlong\.wezterm|xterm|st|thunar|nemo|dolphin|org\.kde\.dolphin|pcmanfm)$/
+
+  // The folder a saved or captured app was in, if it is folder-bound (see
+  // folderApps), else "". Read from its command first (Nautilus
+  // `--new-window <dir>`, `--working-directory=<dir>`), then its cwd.
+  function appFolder(app) {
+    if (!app || typeof app !== "object") return ""
+    var argv = Array.isArray(app.argv) ? app.argv.map(String) : []
+    for (var i = 0; i < argv.length; i++) {
+      if (argv[i].indexOf("--working-directory=") === 0) return root.cleanFolder(argv[i].slice(20))
+    }
+    var prog = argv.length > 0 ? argv[0].split("/").pop().toLowerCase() : ""
+    var n = argv.indexOf("--new-window")
+    if (prog === "nautilus" && n !== -1 && n + 1 < argv.length) return root.cleanFolder(argv[n + 1])
+    if (!root.folderApps.test(String(app["class"] || "").toLowerCase()) && !root.folderApps.test(prog)) return ""
+    return root.cleanFolder(app.cwd)
+  }
+
+  function cleanFolder(path) {
+    var f = String(path || "")
+    if (f === "~" || f.indexOf("~/") === 0) f = root.homeDir + f.slice(1)
+    while (f.length > 1 && f.charAt(f.length - 1) === "/") f = f.slice(0, -1)
+    return f
   }
 
   // Names an app goes by, lower-cased: "org.gnome.Nautilus" also as
@@ -1759,26 +1834,65 @@ BarWidget {
 
   Process {
     id: profileCapture
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.finishProfileSave(String(text))
-    }
+    stdout: StdioCollector { id: profileCaptureOut; waitForEnd: true }
+    onExited: function(code) { root.finishProfileSave(String(profileCaptureOut.text), code) }
   }
 
-  function finishProfileSave(text) {
-    var p = root.pendingProfile
-    root.pendingProfile = null
-    if (p === null) return
-    var deck = {}
+  // ws-room capture-deck output: {"<ws>": [app, ...]} with one list for
+  // every id asked for. Returns that map, or null if ws-room failed, the
+  // JSON is broken, or any card's list is missing or malformed, so a
+  // failed read can never be saved as "no apps".
+  function readDeck(text, code, ids) {
+    if (code !== 0) return null
+    var deck
     try {
       deck = JSON.parse(text)
     } catch (e) {
-      deck = {}
+      return null
+    }
+    if (deck === null || typeof deck !== "object" || Array.isArray(deck)) return null
+    for (var i = 0; i < ids.length; i++) {
+      if (!root.validAppList(deck[String(ids[i])])) return null
+    }
+    return deck
+  }
+
+  // A captured app list as ws-room writes it: [{class, argv: [...], ...}].
+  function validAppList(list) {
+    if (!Array.isArray(list)) return false
+    for (var j = 0; j < list.length; j++) {
+      var app = list[j]
+      if (app === null || typeof app !== "object" || Array.isArray(app)
+          || typeof app["class"] !== "string" || !Array.isArray(app.argv)) return false
+    }
+    return true
+  }
+
+  // The typed name matches a saved profile: saving replaces it.
+  function profileNamed(name) {
+    var n = String(name || "").trim().toLowerCase()
+    if (n === "") return null
+    for (var i = 0; i < root.profiles.length; i++) {
+      if (String(root.profiles[i].name).toLowerCase() === n) return root.profiles[i]
+    }
+    return null
+  }
+
+  function finishProfileSave(text, code) {
+    var p = root.pendingProfile
+    root.pendingProfile = null
+    if (p === null) return
+    var deck = root.readDeck(text, code, p.ids)
+    if (deck === null) {
+      // Nothing saved; a profile of the same name keeps its apps.
+      root.logLine("profile capture failed (exit " + code + "), nothing saved")
+      root.profileNotice = "Couldn't read the open apps, so nothing was saved" +
+        (root.profileNamed(p.name) !== null ? " and \u201c" + p.name + "\u201d is unchanged." : ".") + " Try again."
+      return
     }
     var apps = 0
     for (var i = 0; i < p.ids.length; i++) {
-      var got = deck && Array.isArray(deck[String(p.ids[i])]) ? deck[String(p.ids[i])] : []
-      p.rooms[i].apps = got.slice(0, 30)
+      p.rooms[i].apps = deck[String(p.ids[i])].slice(0, 30)
       apps += p.rooms[i].apps.length
     }
     var list = root.profiles.filter(function(q) {
@@ -1816,7 +1930,7 @@ BarWidget {
       root.profileNotice = "\u201c" + p.name + "\u201d is already open."
       return
     }
-    if (profileLauncher.running) {
+    if (root.profileBusy) {
       root.profileNotice = "Still opening the last profile\u2026 wait until its apps are up."
       return
     }
@@ -1837,7 +1951,7 @@ BarWidget {
   function openProfile(index, others) {
     root.profileConfirm = -1
     var p = root.profiles[index]
-    if (!p || profileLauncher.running || root.profileOnBar(p) || root.profileMatch(p).dupes.length > 0) return
+    if (!p || root.profileBusy || root.profileOnBar(p) || root.profileMatch(p).dupes.length > 0) return
     var rooms = []
     for (var r = 0; r < (p.rooms.length || 0); r++) rooms.push(p.rooms[r])
     // Cards already on the bar are reused (only their missing apps start);
@@ -1904,12 +2018,48 @@ BarWidget {
     root.persistAll(order, hidden, labels)
     root.settingsOpen = false
     root.setActiveProfile(p.name, ids)
-    var deck = []
+    // Reused cards that have windows: read what is open there (and in which
+    // folder) before deciding what to start. Open stays locked meanwhile and
+    // until ws-room has placed the apps (or given up), so a second click
+    // can't start them again.
+    var plan = { ids: ids, rooms: rooms, slots: slots, probe: [] }
     for (var d = 0; d < ids.length; d++) {
-      deck.push({ ws: ids[d], apps: slots[d] > 0 ? root.missingApps(rooms[d], ids[d]) : (rooms[d].apps || []) })
+      if (slots[d] > 0 && root.toplevelsOf(ids[d]).length > 0 && (rooms[d].apps || []).length > 0)
+        plan.probe.push(ids[d])
     }
-    // Open stays locked until ws-room has placed the apps (or given up), so
-    // a second click can't start them again.
+    if (plan.probe.length === 0) {
+      root.launchProfile(plan, null)
+      return
+    }
+    root.pendingOpen = plan
+    openCapture.command = [root.roomScript, "capture-deck"].concat(plan.probe.map(String))
+    openCapture.running = true
+  }
+
+  property var pendingOpen: null   // profile waiting for its reused cards to be read
+  readonly property bool profileBusy: profileLauncher.running || openCapture.running
+
+  Process {
+    id: openCapture
+    stdout: StdioCollector { id: openCaptureOut; waitForEnd: true }
+    onExited: function(code) {
+      var plan = root.pendingOpen
+      root.pendingOpen = null
+      if (plan === null) return
+      var open = root.readDeck(String(openCaptureOut.text), code, plan.probe)
+      if (open === null) root.logLine("profile open: couldn't read the open apps (exit " + code + "); folder apps started anyway")
+      root.launchProfile(plan, open)
+    }
+  }
+
+  function launchProfile(plan, open) {
+    var deck = []
+    for (var d = 0; d < plan.ids.length; d++) {
+      var id = plan.ids[d]
+      deck.push({ ws: id, apps: plan.slots[d] > 0
+        ? root.missingApps(plan.rooms[d], id, open !== null && plan.probe.indexOf(id) !== -1 ? open[String(id)] : null)
+        : (plan.rooms[d].apps || []) })
+    }
     if (deck.length > 0) root.launchRooms(deck)
   }
 
@@ -3232,6 +3382,93 @@ BarWidget {
     root.persistOrder(next)
   }
 
+  // ---- Drag to reorder inside the stack popup ----
+  // The held row (its index in stackIds), how far it has been carried along
+  // the list, and the slot it would land in. The other rows step aside to
+  // open a gap there; on release the held row settles into the gap and the
+  // new order is saved, the same `order` the bar drag writes.
+  property int stackHeld: -1
+  property real stackCarry: 0
+  property int stackSlot: -1
+  property bool stackSettling: false
+  // Rows rebuilt by a drop keep still instead of dealing in again.
+  property bool stackNoDeal: false
+  readonly property real stackStep: root.chipH + Style.space(6)
+  onStackOpenChanged: if (!root.stackOpen) root.cancelStackDrag()
+  onStackIdsChanged: if (root.stackHeld >= 0) root.cancelStackDrag()
+
+  // How far a row that isn't held moves to make room.
+  function stackShift(index) {
+    var from = root.stackHeld
+    var to = root.stackSlot
+    if (from < 0 || to < 0 || index === from) return 0
+    if (from < to && index > from && index <= to) return -root.stackStep
+    if (to < from && index >= to && index < from) return root.stackStep
+    return 0
+  }
+
+  function holdStackRow(index) {
+    stackSettle.stop()
+    root.stackSettling = false
+    root.stackCarry = 0
+    root.stackSlot = index
+    root.stackHeld = index
+  }
+
+  // `dy`: pointer travel since the press, kept within the list.
+  function carryStackRow(dy) {
+    var n = root.stackIds.length
+    var from = root.stackHeld
+    if (from < 0 || n < 2) return
+    root.stackCarry = Math.max(-from * root.stackStep, Math.min((n - 1 - from) * root.stackStep, dy))
+    root.stackSlot = Math.max(0, Math.min(n - 1, from + Math.round(root.stackCarry / root.stackStep)))
+  }
+
+  function dropStackRow() {
+    var from = root.stackHeld
+    if (from < 0) return
+    root.stackSettling = true
+    root.stackCarry = (root.stackSlot - from) * root.stackStep
+    stackSettle.restart()
+  }
+
+  function cancelStackDrag() {
+    stackSettle.stop()
+    root.stackHeld = -1
+    root.stackSlot = -1
+    root.stackCarry = 0
+    root.stackSettling = false
+  }
+
+  Timer {
+    id: stackSettle
+    interval: Math.max(1, Style.duration(150))
+    onTriggered: {
+      var from = root.stackHeld
+      var to = root.stackSlot
+      // Clear the drag first: the save below rebuilds the rows, and the new
+      // ones must start from rest, not from the held row's offset.
+      root.cancelStackDrag()
+      if (from < 0 || to < 0 || from === to) return
+      root.stackNoDeal = true
+      root.moveInStack(from, to)
+      Qt.callLater(function() { root.stackNoDeal = false })
+    }
+  }
+
+  // Move the stack's `from`-th card to its `to`-th place. Cards on the bar
+  // keep theirs: only the stack's own positions in the order are reused.
+  function moveInStack(from, to) {
+    var stack = root.stackIds
+    if (from === to || from < 0 || to < 0 || from >= stack.length || to >= stack.length) return
+    var moved = root.reordered(stack, from, to)
+    var k = 0
+    var next = root.displayIds.map(function(id) { return stack.indexOf(id) !== -1 ? moved[k++] : id })
+    root.localOrder = next
+    root.syncIds()
+    root.persistOrder(next)
+  }
+
   function slotPos(i) {
     var v = root.starts[i]
     return v === undefined ? 0 : v
@@ -3269,7 +3506,8 @@ BarWidget {
     onOpenChanged: {
       if (!open) return
       // Reopened while its apps are still closing: show that, not the editor.
-      root.editMode = root.pendingDeletes[String(root.editingId)] !== undefined ? "closing"
+      root.editMode = root.deleteLandings[String(root.editingId)] !== undefined ? "moving"
+        : root.pendingDeletes[String(root.editingId)] !== undefined ? "closing"
         : root.pendingCloses[String(root.editingId)] !== undefined ? "closingKeep" : "edit"
       nameField.text = root.customName(root.editingId)
       root.draftEmoji = root.customEmoji(root.editingId)
@@ -3885,6 +4123,8 @@ BarWidget {
           if (root.editMode === "closingKeep") return "Closing " + n + (n === 1 ? " app" : " apps") + "… apps with unsaved work may ask first."
           if (root.editMode === "closeKeepFailed") return n + (n === 1 ? " app is" : " apps are") + " still open. Save or close them yourself; the card stays either way."
           if (root.editMode === "closing") return "Closing " + n + (n === 1 ? " app" : " apps") + "… apps with unsaved work may ask first."
+          if (root.editMode === "moving") return "Moving " + n + (n === 1 ? " window" : " windows") + "… the card goes once the workspace is empty."
+          if (root.editMode === "moveFailed") return n + (n === 1 ? " window" : " windows") + " didn't move, so the card was kept with its name, emoji and colour. Try again, or close them."
           if (root.editMode === "closeFailed") return n + (n === 1 ? " app is" : " apps are") + " still open. Close or save them yourself and the card goes once they're closed, or move them instead."
           if (root.editMode === "confirmClose") return "Close " + n + (n === 1 ? " app" : " apps") + "? Unsaved work in them may be lost."
           if (n === 0) return "It has no windows. The card will be removed from the bar."
@@ -3919,7 +4159,7 @@ BarWidget {
 
       // One row per window: icon, title, destination.
       Repeater {
-        model: root.editMode === "delete" || root.editMode === "closeFailed"
+        model: root.editMode === "delete" || root.editMode === "closeFailed" || root.editMode === "moveFailed"
           || root.editMode === "confirmCloseKeep" || root.editMode === "closeKeepFailed" ? root.deleteWindows : []
 
         Item {
@@ -3998,6 +4238,12 @@ BarWidget {
         }
 
         Button {
+          visible: root.editMode === "moveFailed"
+          text: "Try again"
+          onClicked: root.startDelete()
+        }
+
+        Button {
           visible: root.editMode === "confirmCloseKeep"
           text: "Yes, close apps"
           onClicked: root.closeAndKeep()
@@ -4011,7 +4257,7 @@ BarWidget {
 
         Button {
           visible: root.editMode !== "closing" && root.editMode !== "closingKeep"
-            && root.editMode !== "closeKeepFailed"
+            && root.editMode !== "closeKeepFailed" && root.editMode !== "moving"
           text: root.editMode === "delete" || root.editMode === "confirmCloseKeep" ? "Back" : "Cancel"
           onClicked: {
             if (root.editMode === "delete" || root.editMode === "confirmCloseKeep") root.editMode = "edit"
@@ -4427,14 +4673,19 @@ BarWidget {
         color: Color.urgent
       }
 
+      // Installed: switches window drop alone (`ws-setup drop`, which only
+      // rewrites the generated file and never installs). Not installed: just
+      // the choice Install will use; nothing is changed until Install.
       Toggle {
         width: parent.width
         label: "Window drop"
-        description: "Super+drag a window onto a card to move it there"
-        checked: root.integration.installed === true ? root.integration.drop === true : true
+        description: root.integration.installed === true
+          ? "Super+drag a window onto a card to move it there"
+          : "Super+drag a window onto a card to move it there (applied when you press Install)"
+        checked: root.integration.installed === true ? root.integration.drop === true : root.dropChoice
         onClicked: {
-          var on = !(root.integration.installed === true ? root.integration.drop === true : true)
-          root.runSetup(on ? ["install", "--quiet"] : ["install", "--no-drop", "--quiet"])
+          if (root.integration.installed === true) root.runSetup(["drop", root.integration.drop === true ? "off" : "on", "--quiet"])
+          else root.dropChoice = !root.dropChoice
         }
       }
 
@@ -4444,8 +4695,10 @@ BarWidget {
         Button {
           text: root.integration.installed === true && root.integration.ok !== true ? "Re-apply"
             : root.integration.installed === true ? "Reinstall" : "Install"
-          onClicked: root.runSetup(root.integration.drop === false && root.integration.installed === true
-            ? ["install", "--no-drop"] : ["install"])
+          onClicked: {
+            var drop = root.integration.installed === true ? root.integration.drop !== false : root.dropChoice
+            root.runSetup(drop ? ["install"] : ["install", "--no-drop"])
+          }
         }
 
         Button {
@@ -4694,7 +4947,8 @@ BarWidget {
         Button {
           id: saveProfileBtn
           anchors.verticalCenter: parent.verticalCenter
-          text: "Save " + root.pickedIds.length
+          // "Update" when the name is taken: saving replaces that profile.
+          text: (root.profileNamed(profileNameField.text) !== null ? "Update " : "Save ") + root.pickedIds.length
           enabled: root.pickedIds.length > 0 && !profileCapture.running
           onClicked: root.saveProfile(profileNameField.text)
         }
@@ -4774,10 +5028,10 @@ BarWidget {
                 spacing: Style.space(4)
 
                 Button {
-                  text: profileLauncher.running ? "Opening\u2026"
+                  text: root.profileBusy ? "Opening\u2026"
                     : root.profileOnBar(profileRow.modelData) ? "On"
                     : root.profilePartial(profileRow.modelData) ? "Restore" : "Open"
-                  enabled: !profileLauncher.running && !root.profileOnBar(profileRow.modelData)
+                  enabled: !root.profileBusy && !root.profileOnBar(profileRow.modelData)
                   tooltipText: root.profileOnBar(profileRow.modelData) ? "Already open on the bar"
                     : root.profilePartial(profileRow.modelData) ? "Brings back only the cards you deleted" : ""
                   onClicked: root.requestProfile(profileRow.index)
@@ -4803,14 +5057,14 @@ BarWidget {
 
               Button {
                 text: "Close apps"
-                enabled: !profileLauncher.running
+                enabled: !root.profileBusy
                 foreground: Color.urgent
                 onClicked: root.openProfile(profileRow.index, "close")
               }
 
               Button {
                 text: "Keep them"
-                enabled: !profileLauncher.running
+                enabled: !root.profileBusy
                 onClicked: root.openProfile(profileRow.index, "keep")
               }
 
@@ -5726,9 +5980,9 @@ BarWidget {
   }
 
   // The stack fanned out: one row per stacked card, dealt in one after the
-  // other from the chip. Click a row to go there, right-click to edit it,
-  // the arrow moves it to the front of the bar. Click-mode PopupCard, so a
-  // click anywhere else closes it.
+  // other from the chip. Click a row to go there, drag it up or down to
+  // reorder, right-click to edit it, the arrow moves it to the front of the
+  // bar. Click-mode PopupCard, so a click anywhere else closes it.
   PopupCard {
     id: stackCard
     anchorItem: stackBtn
@@ -5763,14 +6017,23 @@ BarWidget {
           // 0 → 1 as the row is dealt in: each row fades in and settles
           // down from the chip a beat after the one above it.
           property real reveal: 1
+          // Held and carried by a drag, or stepping aside for the held row.
+          readonly property bool held: root.stackHeld === stackRow.index
+          readonly property real shift: held ? root.stackCarry : root.stackShift(stackRow.index)
+          property real shown: shift
+          Behavior on shown {
+            enabled: !stackRow.held || root.stackSettling
+            NumberAnimation { duration: Style.duration(150); easing.type: Easing.OutCubic }
+          }
 
           width: stackColumn.width
           height: root.chipH
+          z: held ? 1 : 0
           opacity: reveal
           scale: 0.97 + 0.03 * reveal
           transformOrigin: Item.Top
           transform: Translate {
-            y: (1 - stackRow.reveal) * -Style.space(8)
+            y: (1 - stackRow.reveal) * -Style.space(8) + stackRow.shown
           }
 
           function deal() {
@@ -5802,14 +6065,15 @@ BarWidget {
             width: parent.width - root.chipH - Style.space(6)
             height: parent.height
 
-            Component.onCompleted: if (root.stackOpen) stackRow.deal()
+            Component.onCompleted: if (root.stackOpen && !root.stackNoDeal) stackRow.deal()
 
             Shape {
               anchors.fill: parent
 
               ShapePath {
-                strokeWidth: stackRow.solid ? 2 : 1
-                strokeColor: stackRow.solid ? Qt.lighter(stackRow.tint, 1.3)
+                strokeWidth: stackRow.solid || stackRow.held ? 2 : 1
+                strokeColor: stackRow.held && !stackRow.solid ? Color.accent
+                  : stackRow.solid ? Qt.lighter(stackRow.tint, 1.3)
                   : stackRow.focused ? Util.alpha(stackRow.tint, 0.95)
                   : stackRow.tintHex !== "" ? Util.alpha(stackRow.tint, stackRow.hovered ? 1 : (stackRow.occupied ? 0.7 : 0.4))
                   : Util.alpha(Color.foreground, stackRow.hovered ? 0.85 : (stackRow.occupied ? 0.5 : 0.28))
@@ -5850,13 +6114,42 @@ BarWidget {
                 : Util.alpha(Color.foreground, 0.7)
             }
 
+            // Click goes there; press and move past a few pixels picks the
+            // row up instead (no click then). Positions are read in the
+            // list's coordinates, which the carried row doesn't move.
             MouseArea {
               id: stackRowMouse
+              property real pressY: 0
+              property bool dragging: false
               anchors.fill: parent
               hoverEnabled: true
+              preventStealing: true
               acceptedButtons: Qt.LeftButton | Qt.RightButton
-              cursorShape: Qt.PointingHandCursor
+              cursorShape: dragging ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+              onPressed: function(mouse) {
+                dragging = false
+                if (mouse.button === Qt.LeftButton) pressY = mapToItem(stackColumn, mouse.x, mouse.y).y
+              }
+              onPositionChanged: function(mouse) {
+                if (!pressed || !(mouse.buttons & Qt.LeftButton) || root.stackSettling) return
+                var dy = mapToItem(stackColumn, mouse.x, mouse.y).y - pressY
+                if (!dragging) {
+                  if (Math.abs(dy) < Style.space(4) || root.stackIds.length < 2) return
+                  dragging = true
+                  root.holdStackRow(stackRow.index)
+                }
+                root.carryStackRow(dy)
+              }
+              onReleased: if (dragging && stackRow.held) root.dropStackRow()
+              onCanceled: {
+                if (dragging && stackRow.held) root.cancelStackDrag()
+                dragging = false
+              }
               onClicked: function(mouse) {
+                if (dragging) {
+                  dragging = false
+                  return
+                }
                 var id = stackRow.modelData
                 root.stackOpen = false
                 if (mouse.button === Qt.RightButton) root.startRename(id, stackBtn)
@@ -5901,7 +6194,7 @@ BarWidget {
         textFormat: Text.PlainText
         width: parent.width
         wrapMode: Text.WordWrap
-        text: "Click: go there · Right-click: edit · "
+        text: "Click: go there · Drag: reorder · Right-click: edit · "
           + (root.bar && root.bar.position === "bottom" ? "↓" : "↑") + (root.stackAll ? ": first in the list" : ": first on the bar")
         color: Util.alpha(Color.foreground, 0.6)
         font.family: Style.font.family
